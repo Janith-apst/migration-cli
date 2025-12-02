@@ -8,6 +8,12 @@ Create a new schema with an auto-generated name:
 pnpm dev create
 ```
 
+Create multiple schemas at once:
+
+```bash
+pnpm dev create-bulk <number_of_schemas>
+```
+
 Create with custom name:
 
 ```bash

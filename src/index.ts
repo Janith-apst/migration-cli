@@ -87,6 +87,116 @@ program
     });
 
 program
+    .command('create-bulk <count>')
+    .description('Create multiple schemas at once')
+    .option('-y, --yes', 'Skip confirmation prompt')
+    .action(async (count, options) => {
+        try {
+            const schemaCount = parseInt(count, 10);
+
+            if (isNaN(schemaCount) || schemaCount < 1) {
+                logger.error('Count must be a positive integer');
+                process.exit(1);
+            }
+
+            if (schemaCount > 100) {
+                logger.error('Maximum 100 schemas can be created at once');
+                process.exit(1);
+            }
+
+            logger.header(`🚀 Bulk Schema Creation (${schemaCount} schemas)`);
+
+            logger.startSpinner('Testing database connection...');
+            await testConnection();
+            logger.succeedSpinner('Database connection successful');
+
+            logger.startSpinner('Verifying common schema...');
+            await verifyCommonSchema();
+            logger.succeedSpinner('Common schema verified');
+
+            if (!options.yes) {
+                const answer = await inquirer.prompt([
+                    {
+                        type: 'confirm',
+                        name: 'proceed',
+                        message: `Create ${schemaCount} new schema${schemaCount > 1 ? 's' : ''}?`,
+                        default: true,
+                    },
+                ]);
+
+                if (!answer.proceed) {
+                    logger.info('Operation cancelled');
+                    process.exit(0);
+                }
+            }
+
+            logger.log('');
+            logger.divider();
+
+            const results = {
+                successful: [] as string[],
+                failed: [] as { name: string; error: string }[],
+            };
+
+            for (let i = 1; i <= schemaCount; i++) {
+                logger.log(`\n${chalk.bold(`[${i}/${schemaCount}]`)} Creating schema...`);
+
+                const result = await createSchema({
+                    force: false,
+                });
+
+                if (result.success) {
+                    results.successful.push(result.schemaName);
+                    logger.success(`✓ ${chalk.cyan(result.schemaName)} created (ID: ${result.schemaId})`);
+                } else {
+                    results.failed.push({
+                        name: result.schemaName,
+                        error: result.error || 'Unknown error',
+                    });
+                    logger.error(`✗ Failed: ${result.error}`);
+                }
+            }
+
+            logger.log('');
+            logger.divider();
+            logger.header('📊 Bulk Creation Summary');
+
+            logger.success(`✅ Successfully created: ${chalk.bold(results.successful.length)} schema${results.successful.length !== 1 ? 's' : ''}`);
+
+            if (results.successful.length > 0) {
+                logger.log('');
+                logger.log(chalk.bold('Created schemas:'));
+                results.successful.forEach((name, index) => {
+                    logger.log(`  ${index + 1}. ${chalk.cyan(name)}`);
+                });
+            }
+
+            if (results.failed.length > 0) {
+                logger.log('');
+                logger.error(`❌ Failed: ${chalk.bold(results.failed.length)} schema${results.failed.length !== 1 ? 's' : ''}`);
+                logger.log('');
+                logger.log(chalk.bold('Failed schemas:'));
+                results.failed.forEach((item, index) => {
+                    logger.log(`  ${index + 1}. ${chalk.red(item.name)}: ${item.error}`);
+                });
+            }
+
+            logger.log('');
+            logger.divider();
+
+            if (results.failed.length > 0) {
+                process.exit(1);
+            }
+        } catch (error) {
+            logger.failSpinner();
+            logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        } finally {
+            await closePool();
+        }
+    });
+
+program
     .command('list')
     .description('List all schemas in the pool')
     .option('-s, --status <status>', 'Filter by status (AVAILABLE, ALLOCATED, DELETED)')
