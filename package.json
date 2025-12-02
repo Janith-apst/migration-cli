@@ -1,0 +1,41 @@
+{
+  "name": "migration-cli",
+  "version": "1.0.0",
+  "description": "PostgreSQL schema migration CLI tool",
+  "main": "dist/index.js",
+  "type": "module",
+  "bin": {
+    "migration-cli": "./dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "postgresql",
+    "migration",
+    "cli",
+    "schema"
+  ],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.20.0",
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.5",
+    "inquirer": "^10.2.2",
+    "nanoid": "^5.0.8",
+    "ora": "^8.1.0",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/inquirer": "^9.0.7",
+    "@types/node": "^22.10.1",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
