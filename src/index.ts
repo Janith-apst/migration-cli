@@ -876,6 +876,53 @@ program
         }
     });
 
+program
+    .command('unuse')
+    .description('Remove the configured SQL template')
+    .action(async () => {
+        try {
+            logger.header('🗑️  Remove SQL Template');
+            const templatePath = await getTemplatePath();
+            if (!templatePath) {
+                logger.log('');
+                logger.info('No template is currently configured');
+                process.exit(0);
+            }
+
+            logger.log('');
+            logger.log(chalk.bold('Current Template:'));
+            logger.log(`  ${chalk.cyan(templatePath)}`);
+            logger.log('');
+
+            const answer = await inquirer.prompt([
+                {
+                    type: 'confirm',
+                    name: 'confirm',
+                    message: 'Remove this template configuration?',
+                    default: false,
+                },
+            ]);
+
+            if (!answer.confirm) {
+                logger.info('Operation cancelled');
+                process.exit(0);
+            }
+
+            logger.startSpinner('Removing template configuration...');
+            await clearTemplatePath();
+            logger.succeedSpinner('Template configuration removed');
+
+            logger.log('');
+            logger.success('✅ Template configuration removed');
+            logger.log('');
+            logger.log(`Run ${chalk.cyan('migration-cli use <path-to-sql-file>')} to configure a new template.`);
+        } catch (error) {
+            logger.failSpinner();
+            logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        }
+    });
+
 
 function getStatusColor(status: string): string {
     switch (status) {
