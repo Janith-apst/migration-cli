@@ -108,13 +108,12 @@ ensure_dirs_writable() {
 create_wrapper() {
   local install_dir="$1" bin_path="$2"
   mkdir -p "${install_dir}/bin"
-  cat >"${install_dir}/bin/${APP_NAME}" <<'EOF'
+  cat >"${install_dir}/bin/${APP_NAME}" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
-APP_HOME="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
-export NODE_PATH="${APP_HOME}/node_modules"
-exec node "${APP_HOME}/dist/index.js" "$@"
+APP_HOME="${install_dir}"
+export NODE_PATH="\${APP_HOME}/node_modules"
+exec node "\${APP_HOME}/dist/index.js" "\$@"
 EOF
   chmod +x "${install_dir}/bin/${APP_NAME}"
   ln -sf "${install_dir}/bin/${APP_NAME}" "$bin_path/${APP_NAME}"

@@ -111,7 +111,7 @@ Expand-Archive -Path $archivePath -DestinationPath $installRoot -Force
 Move-InnerIfWrapped $installRoot
 
 Ensure-Dir $binDir
-$shim = "@echo off`r`nsetlocal`r`nset SCRIPT_DIR=%~dp0`r`nset APP_HOME=%SCRIPT_DIR%..`r`nset NODE_PATH=%APP_HOME%\\node_modules`r`nnode \"%APP_HOME%\\dist\\index.js\" %*`r`n"
+$shim = "@echo off`r`nsetlocal`r`nset APP_HOME=$installRoot`r`nset NODE_PATH=%APP_HOME%\\node_modules`r`nnode \"%APP_HOME%\\dist\\index.js\" %*`r`n"
 Set-Content -Path $shimPath -Value $shim -Encoding ASCII
 
 $addedUser = Add-ToPath $binDir ([System.EnvironmentVariableTarget]::User)
