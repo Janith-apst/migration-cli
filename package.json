@@ -9,7 +9,9 @@
   },
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "tsc",
+    "build": "pnpm exec tsc",
+    "clean": "node -e \"const fs=require('fs');['dist','artifacts'].forEach(d=>fs.rmSync(d,{recursive:true,force:true}));\"",
+    "package": "node scripts/package-release.mjs",
     "start": "node dist/index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -21,6 +23,9 @@
   ],
   "author": "",
   "license": "ISC",
+  "engines": {
+    "node": ">=18"
+  },
   "packageManager": "pnpm@10.20.0",
   "dependencies": {
     "chalk": "^5.3.0",

@@ -1,35 +1,80 @@
-## Usage
+## Installation
+
+Requirements: Node.js >= 18.
+
+Release assets should be published to GitHub Releases as:
+
+- macOS/Linux: `migration-cli-<os>-<arch>.tar.gz` (os: `macos|linux`, arch: `x64|arm64`)
+- Windows: `migration-cli-windows-<arch>.zip` (arch: `x64|arm64`)
+
+### macOS / Linux (per-user, default)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Janith-apst/migration-cli/main/scripts/install.sh | bash
+```
+
+System-wide install (e.g., /usr/local or /opt/homebrew):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Janith-apst/migration-cli/main/scripts/install.sh | sudo bash -s -- --system
+```
+
+Uninstall:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Janith-apst/migration-cli/main/scripts/install.sh | bash -s -- --uninstall
+```
+
+### Windows (PowerShell)
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Janith-apst/migration-cli/main/scripts/install.ps1 | iex"
+```
+
+System-wide install (requires elevated PowerShell):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Janith-apst/migration-cli/main/scripts/install.ps1 -OutFile $env:TEMP/migration-cli-install.ps1; & $env:TEMP/migration-cli-install.ps1 -System"  # run in an admin shell
+```
+
+Uninstall:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Janith-apst/migration-cli/main/scripts/install.ps1 -OutFile $env:TEMP/migration-cli-install.ps1; & $env:TEMP/migration-cli-install.ps1 -Uninstall"
+```
+
+## Usage (after install)
 
 ### Create a New Schema
 
 Create a new schema with an auto-generated name:
 
 ```bash
-pnpm dev create
+migration-cli create
 ```
 
 Create multiple schemas at once:
 
 ```bash
-pnpm dev create-bulk <number_of_schemas>
+migration-cli create-bulk <number_of_schemas>
 ```
 
 Create with custom name:
 
 ```bash
-pnpm dev create --name account_mycustom
+migration-cli create --name account_mycustom
 ```
 
 Force recreate if exists:
 
 ```bash
-pnpm dev create --force
+migration-cli create --force
 ```
 
 Skip confirmation prompt:
 
 ```bash
-pnpm dev create --yes
+migration-cli create --yes
 ```
 
 ### List All Schemas
@@ -37,15 +82,15 @@ pnpm dev create --yes
 List all schemas in the pool:
 
 ```bash
-pnpm dev list
+migration-cli list
 ```
 
 Filter by status:
 
 ```bash
-pnpm dev list --status AVAILABLE
-pnpm dev list --status ALLOCATED
-pnpm dev list --status DELETED
+migration-cli list --status AVAILABLE
+migration-cli list --status ALLOCATED
+migration-cli list --status DELETED
 ```
 
 ### Get Schema Information
@@ -53,7 +98,7 @@ pnpm dev list --status DELETED
 Get detailed information about a specific schema:
 
 ```bash
-pnpm dev info account_abc12345
+migration-cli info account_abc12345
 ```
 
 ### Validate Template
@@ -61,5 +106,5 @@ pnpm dev info account_abc12345
 Validate the base schema SQL template:
 
 ```bash
-pnpm dev validate
+migration-cli validate
 ```
