@@ -7,8 +7,10 @@ import { testConnection, verifyCommonSchema, closePool, getDatabaseConfig } from
 import { createSchema, validateSchemaStructure } from './schema/creator.js';
 import { listSchemas, getSchemaFromPool } from './pool/registry.js';
 import { logger } from './utils/logger.js';
-import { readBaseSchema, validateSQL } from './schema/parser.js';
-import { saveEnvConfig, getEnvConfig, listEnvs, getConfigFilePath, getActiveEnv, setActiveEnv, deleteEnvConfig } from './config/manager.js';
+import { readBaseSchema, validateSQL, readSchemaFromPath, analyzeSchemaTemplate } from './schema/parser.js';
+import { saveEnvConfig, getEnvConfig, listEnvs, getConfigFilePath, getActiveEnv, setActiveEnv, deleteEnvConfig, setTemplatePath, getTemplatePath, clearTemplatePath } from './config/manager.js';
+import { resolve } from 'path';
+import { access, constants } from 'fs/promises';
 
 const program = new Command();
 
@@ -536,12 +538,27 @@ program
 
 program
     .command('validate')
-    .description('Validate the base schema SQL template')
+    .description('Validate the configured SQL template')
     .action(async () => {
         try {
             logger.header('🔍 Template Validation');
 
-            logger.startSpinner('Reading base schema template...');
+            const templatePath = await getTemplatePath();
+
+            if (!templatePath) {
+                logger.log('');
+                logger.warn('No template configured');
+                logger.log('');
+                logger.log(`Run ${chalk.cyan('migration-cli use <path-to-sql-file>')} to configure a template.`);
+                process.exit(1);
+            }
+
+            logger.log('');
+            logger.log(chalk.bold('Template:'));
+            logger.log(`  ${chalk.cyan(templatePath)}`);
+            logger.log('');
+
+            logger.startSpinner('Reading template...');
             const template = await readBaseSchema();
             logger.succeedSpinner('Template loaded');
 
@@ -549,17 +566,20 @@ program
             validateSQL(template);
             logger.succeedSpinner('SQL structure is valid');
 
-            const typeCount = (template.match(/CREATE TYPE/g) || []).length;
-            const tableCount = (template.match(/CREATE TABLE/g) || []).length;
-            const indexCount = (template.match(/CREATE INDEX/g) || []).length;
+            logger.startSpinner('Analyzing template...');
+            const analysis = analyzeSchemaTemplate(template);
+            logger.succeedSpinner('Analysis complete');
 
             logger.log('');
-            logger.success('✅ Base schema template is valid!');
+            logger.success('✅ Template is valid!');
             logger.log('');
+            logger.divider();
             logger.log(chalk.bold('Template Statistics:'));
-            logger.log(`  Types:   ${chalk.cyan(typeCount)}`);
-            logger.log(`  Tables:  ${chalk.cyan(tableCount)}`);
-            logger.log(`  Indexes: ${chalk.cyan(indexCount)}`);
+            logger.log(`  ${chalk.bold('Types:')}         ${chalk.cyan(analysis.typeCount)}`);
+            logger.log(`  ${chalk.bold('Tables:')}        ${chalk.cyan(analysis.tableCount)}`);
+            logger.log(`  ${chalk.bold('Indexes:')}       ${chalk.cyan(analysis.indexCount)}`);
+            logger.log(`  ${chalk.bold('Foreign Keys:')}  ${chalk.cyan(analysis.foreignKeyCount)}`);
+            logger.divider();
         } catch (error) {
             logger.failSpinner();
             logger.error(`Validation failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -657,6 +677,202 @@ program
             process.exit(1);
         } finally {
             await closePool();
+        }
+    });
+
+program
+    .command('use <sql-file-path>')
+    .description('Configure a SQL template file to use for schema creation')
+    .action(async (sqlFilePath) => {
+        try {
+            logger.header('📄 Configure SQL Template');
+            const resolvedPath = resolve(sqlFilePath);
+            logger.startSpinner('Validating file path...');
+            try {
+                await access(resolvedPath, constants.R_OK);
+            } catch (error) {
+                logger.failSpinner();
+                logger.error(`Cannot access file: ${resolvedPath}`);
+                logger.error('Please check the file path and permissions');
+                process.exit(1);
+            }
+            logger.succeedSpinner('File path is valid');
+            logger.startSpinner('Reading template file...');
+            let template: string;
+            try {
+                template = await readSchemaFromPath(resolvedPath);
+            } catch (error) {
+                logger.failSpinner();
+                logger.error(`Failed to read file: ${error instanceof Error ? error.message : String(error)}`);
+                process.exit(1);
+            }
+            logger.succeedSpinner('Template loaded');
+            logger.startSpinner('Validating SQL structure...');
+            try {
+                validateSQL(template);
+            } catch (error) {
+                logger.failSpinner();
+                logger.error(`Invalid SQL template: ${error instanceof Error ? error.message : String(error)}`);
+                process.exit(1);
+            }
+            logger.succeedSpinner('SQL structure is valid');
+            logger.startSpinner('Analyzing template...');
+            const analysis = analyzeSchemaTemplate(template);
+            logger.succeedSpinner('Analysis complete');
+
+            logger.log('');
+            logger.divider();
+            logger.log(chalk.bold('📊 Schema Template Preview:'));
+            logger.log('');
+            logger.log(`  ${chalk.bold('Authorization:')} ${analysis.authorization ? chalk.cyan(analysis.authorization) : chalk.gray('Not specified')}`);
+            logger.log(`  ${chalk.bold('Types:')}         ${chalk.cyan(analysis.typeCount)}`);
+            logger.log(`  ${chalk.bold('Tables:')}        ${chalk.cyan(analysis.tableCount)}`);
+            logger.log(`  ${chalk.bold('Indexes:')}       ${chalk.cyan(analysis.indexCount)}`);
+            logger.log(`  ${chalk.bold('Foreign Keys:')}  ${chalk.cyan(analysis.foreignKeyCount)}`);
+            logger.log('');
+
+            if (analysis.tableNames.length > 0) {
+                logger.log(chalk.bold('Tables Found:'));
+                const displayTables = analysis.tableNames.slice(0, 8);
+                displayTables.forEach(table => {
+                    logger.log(`  ${chalk.gray('•')} ${table}`);
+                });
+                if (analysis.tableNames.length > 8) {
+                    logger.log(`  ${chalk.gray(`... and ${analysis.tableNames.length - 8} more`)}`);
+                }
+                logger.log('');
+            }
+
+            logger.log(chalk.bold('File Path:'));
+            logger.log(`  ${chalk.cyan(resolvedPath)}`);
+            logger.divider();
+            logger.log('');
+
+            const answer = await inquirer.prompt([
+                {
+                    type: 'confirm',
+                    name: 'confirm',
+                    message: 'Save this template for future use?',
+                    default: true,
+                },
+            ]);
+
+            if (!answer.confirm) {
+                logger.info('Operation cancelled');
+                process.exit(0);
+            }
+
+            logger.startSpinner('Saving template configuration...');
+            await setTemplatePath(resolvedPath);
+            logger.succeedSpinner('Template configuration saved');
+            logger.log('');
+            logger.success('✅ Template configured successfully!');
+            logger.log('');
+            logger.log(`You can now use ${chalk.cyan('migration-cli create <schema-name>')} to create schemas.`);
+            logger.log(`Config saved to: ${chalk.gray(getConfigFilePath())}`);
+        } catch (error) {
+            logger.failSpinner();
+            logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        }
+    });
+
+program
+    .command('ddl info')
+    .description('Show current SQL template configuration')
+    .action(async () => {
+        try {
+            logger.header('📄 Template Configuration');
+            const templatePath = await getTemplatePath();
+            if (!templatePath) {
+                logger.log('');
+                logger.warn('No template configured');
+                logger.log('');
+                logger.log(`Run ${chalk.cyan('migration-cli use <path-to-sql-file>')} to configure a template.`);
+                process.exit(0);
+            }
+
+            logger.log('');
+            logger.log(chalk.bold('Current Template:'));
+            logger.log(`  ${chalk.cyan(templatePath)}`);
+            logger.log('');
+            logger.startSpinner('Checking file accessibility...');
+            try {
+                await access(templatePath, constants.R_OK);
+                logger.succeedSpinner('File is accessible');
+
+                logger.startSpinner('Analyzing template...');
+                const template = await readSchemaFromPath(templatePath);
+                const analysis = analyzeSchemaTemplate(template);
+                logger.succeedSpinner('Analysis complete');
+
+                logger.log('');
+                logger.divider();
+                logger.log(chalk.bold('Template Details:'));
+                logger.log('');
+                logger.log(`  ${chalk.bold('Authorization:')} ${analysis.authorization ? chalk.cyan(analysis.authorization) : chalk.gray('Not specified')}`);
+                logger.log(`  ${chalk.bold('Types:')}         ${chalk.cyan(analysis.typeCount)}`);
+                logger.log(`  ${chalk.bold('Tables:')}        ${chalk.cyan(analysis.tableCount)}`);
+                logger.log(`  ${chalk.bold('Indexes:')}       ${chalk.cyan(analysis.indexCount)}`);
+                logger.log(`  ${chalk.bold('Foreign Keys:')}  ${chalk.cyan(analysis.foreignKeyCount)}`);
+                logger.divider();
+            } catch (error) {
+                logger.failSpinner();
+                logger.warn('File is not accessible or has been moved');
+                logger.log('');
+                logger.log(`Run ${chalk.cyan('migration-cli use <path-to-sql-file>')} to update the template path.`);
+            }
+        } catch (error) {
+            logger.failSpinner();
+            logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        }
+    });
+
+program
+    .command('template clear')
+    .description('Clear the configured SQL template')
+    .action(async () => {
+        try {
+            logger.header('🗑️  Clear Template Configuration');
+            const templatePath = await getTemplatePath();
+            if (!templatePath) {
+                logger.log('');
+                logger.info('No template is currently configured');
+                process.exit(0);
+            }
+
+            logger.log('');
+            logger.log(chalk.bold('Current Template:'));
+            logger.log(`  ${chalk.cyan(templatePath)}`);
+            logger.log('');
+
+            const answer = await inquirer.prompt([
+                {
+                    type: 'confirm',
+                    name: 'confirm',
+                    message: 'Clear this template configuration?',
+                    default: false,
+                },
+            ]);
+
+            if (!answer.confirm) {
+                logger.info('Operation cancelled');
+                process.exit(0);
+            }
+
+            logger.startSpinner('Clearing template configuration...');
+            await clearTemplatePath();
+            logger.succeedSpinner('Template configuration cleared');
+
+            logger.log('');
+            logger.success('✅ Template configuration removed');
+            logger.log('');
+            logger.log(`Run ${chalk.cyan('migration-cli use <path-to-sql-file>')} to configure a new template.`);
+        } catch (error) {
+            logger.failSpinner();
+            logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
         }
     });
 

@@ -1,22 +1,61 @@
 import { readFile } from 'fs/promises';
-import { join } from 'path';
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
+import { getTemplatePath } from '../config/manager.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+export interface SchemaAnalysis {
+    authorization: string | null;
+    typeCount: number;
+    tableCount: number;
+    indexCount: number;
+    tableNames: string[];
+    foreignKeyCount: number;
+}
 
-
-export async function readBaseSchema(): Promise<string> {
+export async function readSchemaFromPath(filePath: string): Promise<string> {
     try {
-        const templatePath = join(__dirname, '../../templates/base-schema.sql');
-        const content = await readFile(templatePath, 'utf-8');
+        const content = await readFile(filePath, 'utf-8');
         return content;
     } catch (error) {
         throw new Error(
-            `Failed to read base schema template: ${error instanceof Error ? error.message : String(error)}`
+            `Failed to read schema template from ${filePath}: ${error instanceof Error ? error.message : String(error)}`
         );
     }
+}
+
+export async function readBaseSchema(): Promise<string> {
+    const configuredPath = await getTemplatePath();
+    if (configuredPath) {
+        return readSchemaFromPath(configuredPath);
+    }
+
+    throw new Error(
+        'No template configured. Please run: migration-cli use <path-to-sql-file>'
+    );
+}
+
+export function analyzeSchemaTemplate(sql: string): SchemaAnalysis {
+    const authMatch = sql.match(/AUTHORIZATION\s+(\w+)/i);
+    const authorization = authMatch ? authMatch[1] : null;
+    const typeCount = (sql.match(/CREATE TYPE/gi) || []).length;
+    const tableCount = (sql.match(/CREATE TABLE/gi) || []).length;
+    const indexCount = (sql.match(/CREATE INDEX/gi) || []).length;
+    const foreignKeyCount = (sql.match(/FOREIGN KEY/gi) || []).length;
+
+    const tableMatches = sql.matchAll(/CREATE TABLE\s+(?:\{\{SCHEMA_NAME\}\}\.|[\w]+\.)?(\w+)/gi);
+    const tableNames: string[] = [];
+    for (const match of tableMatches) {
+        if (match[1]) {
+            tableNames.push(match[1]);
+        }
+    }
+
+    return {
+        authorization,
+        typeCount,
+        tableCount,
+        indexCount,
+        tableNames,
+        foreignKeyCount
+    };
 }
 
 

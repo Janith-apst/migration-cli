@@ -15,6 +15,7 @@ export interface DatabaseConfig {
 
 export interface ConfigFile {
     activeEnv?: string;
+    templatePath?: string;
     [envName: string]: DatabaseConfig | string | undefined;
 }
 
@@ -78,7 +79,7 @@ export async function saveEnvConfig(
 
 export async function listEnvs(): Promise<string[]> {
     const config = await readConfig();
-    return Object.keys(config).filter(k => k !== 'activeEnv');
+    return Object.keys(config).filter(k => k !== 'activeEnv' && k !== 'templatePath');
 }
 
 export async function getActiveEnv(): Promise<string | null> {
@@ -123,4 +124,37 @@ export async function deleteEnvConfig(envName: string): Promise<void> {
 
 export function getConfigFilePath(): string {
     return CONFIG_FILE;
+}
+
+export async function setTemplatePath(filePath: string): Promise<void> {
+    await ensureConfigDir();
+    try {
+        await fs.access(filePath, fs.constants.R_OK);
+    } catch (error) {
+        throw new Error(`Template file not accessible: ${filePath}`);
+    }
+
+    const config = await readConfig();
+    config.templatePath = path.resolve(filePath);
+    try {
+        await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
+    } catch (error) {
+        throw new Error(`Failed to save template path: ${error}`);
+    }
+}
+
+export async function getTemplatePath(): Promise<string | null> {
+    const config = await readConfig();
+    return config.templatePath || null;
+}
+
+export async function clearTemplatePath(): Promise<void> {
+    const config = await readConfig();
+    delete config.templatePath;
+
+    try {
+        await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
+    } catch (error) {
+        throw new Error(`Failed to clear template path: ${error}`);
+    }
 }
