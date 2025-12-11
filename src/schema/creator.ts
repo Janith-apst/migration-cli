@@ -31,7 +31,7 @@ export function generateSchemaName(customName?: string): string {
 }
 
 export async function schemaExistsInDatabase(schemaName: string): Promise<boolean> {
-    const pool = getPool();
+    const pool = await getPool();
 
     const query = `
     SELECT schema_name 
@@ -50,7 +50,7 @@ export async function schemaExistsInDatabase(schemaName: string): Promise<boolea
 }
 
 export async function dropSchema(schemaName: string): Promise<void> {
-    const pool = getPool();
+    const pool = await getPool();
 
     const query = `DROP SCHEMA IF EXISTS ${schemaName} CASCADE`;
 
@@ -64,7 +64,7 @@ export async function dropSchema(schemaName: string): Promise<void> {
 }
 
 export async function createSchema(options: CreateSchemaOptions = {}): Promise<CreateSchemaResult> {
-    const pool = getPool();
+    const pool = await getPool();
     const client = await pool.connect();
 
     let schemaName: string | null = null;
@@ -158,7 +158,7 @@ export async function createSchema(options: CreateSchemaOptions = {}): Promise<C
 }
 
 export async function validateSchemaStructure(schemaName: string): Promise<boolean> {
-    const pool = getPool();
+    const pool = await getPool();
 
     const expectedTables = [
         'daily_material_aggregate',

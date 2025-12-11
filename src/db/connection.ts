@@ -1,7 +1,5 @@
 import { Pool, PoolConfig } from 'pg';
-import dotenv from 'dotenv';
-
-dotenv.config();
+import { getEnvConfig, getActiveEnv } from '../config/manager.js';
 
 export interface DatabaseConfig {
     host: string;
@@ -12,30 +10,31 @@ export interface DatabaseConfig {
     ssl?: boolean;
 }
 
-export function getDatabaseConfig(): DatabaseConfig {
-    const requiredVars = ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD'];
-    const missing = requiredVars.filter(varName => !process.env[varName]);
-
-    if (missing.length > 0) {
-        throw new Error(
-            `Missing required environment variables: ${missing.join(', ')}\n` +
-            'Please create a .env file based on .env.example'
-        );
+export async function getDatabaseConfig(): Promise<DatabaseConfig> {
+    let envName = process.env.MIGRATION_ENV;
+    if (!envName) {
+        const activeEnv = await getActiveEnv();
+        envName = activeEnv || 'default';
     }
 
-    return {
-        host: process.env.DB_HOST!,
-        port: parseInt(process.env.DB_PORT!, 10),
-        database: process.env.DB_NAME!,
-        user: process.env.DB_USER!,
-        password: process.env.DB_PASSWORD!,
-        ssl: process.env.DB_SSL === 'true',
-    };
+    const configFromFile = await getEnvConfig(envName);
+    if (configFromFile) {
+        return configFromFile;
+    }
+
+    throw new Error(
+        `Configuration not found for environment '${envName}'.\n\n` +
+        `Set up using config file:\n` +
+        `  pnpm cli configure ${envName}\n`
+    );
 }
 
 export function createPool(config?: DatabaseConfig): Pool {
-    const dbConfig = config || getDatabaseConfig();
+    if (!config) {
+        throw new Error('Database configuration is required. Please run "pnpm cli configure" first.');
+    }
 
+    const dbConfig = config;
     const poolConfig: PoolConfig = {
         host: dbConfig.host,
         port: dbConfig.port,
@@ -50,15 +49,17 @@ export function createPool(config?: DatabaseConfig): Pool {
     if (dbConfig.ssl) {
         poolConfig.ssl = { rejectUnauthorized: false };
     }
-
     return new Pool(poolConfig);
 }
 
 let pool: Pool | null = null;
-
-export function getPool(): Pool {
+let dbConfig: DatabaseConfig | null = null;
+export async function getPool(): Promise<Pool> {
     if (!pool) {
-        pool = createPool();
+        if (!dbConfig) {
+            dbConfig = await getDatabaseConfig();
+        }
+        pool = createPool(dbConfig);
     }
     return pool;
 }
@@ -71,7 +72,7 @@ export async function closePool(): Promise<void> {
 }
 
 export async function testConnection(): Promise<boolean> {
-    const testPool = getPool();
+    const testPool = await getPool();
     try {
         const client = await testPool.connect();
         await client.query('SELECT 1');
@@ -85,8 +86,7 @@ export async function testConnection(): Promise<boolean> {
 }
 
 export async function verifyCommonSchema(): Promise<void> {
-    const pool = getPool();
-
+    const pool = await getPool();
     try {
         const schemaResult = await pool.query(
             `SELECT schema_name FROM information_schema.schemata WHERE schema_name = 'common'`

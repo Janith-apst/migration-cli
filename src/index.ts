@@ -8,6 +8,7 @@ import { createSchema, validateSchemaStructure } from './schema/creator.js';
 import { listSchemas, getSchemaFromPool } from './pool/registry.js';
 import { logger } from './utils/logger.js';
 import { readBaseSchema, validateSQL } from './schema/parser.js';
+import { saveEnvConfig, getEnvConfig, listEnvs, getConfigFilePath, getActiveEnv, setActiveEnv, deleteEnvConfig } from './config/manager.js';
 
 const program = new Command();
 
@@ -15,6 +16,292 @@ program
     .name('migration-cli')
     .description('PostgreSQL schema migration CLI tool')
     .version('1.0.0');
+
+program
+    .command('configure <env-name>')
+    .description('Configure database credentials for an environment')
+    .action(async (envName) => {
+        try {
+            logger.header(`⚙️  Configure Database - ${envName}`);
+
+            // Check if environment already exists
+            const existingConfig = await getEnvConfig(envName);
+            if (existingConfig) {
+                logger.log('');
+                logger.warn(`Environment '${envName}' already exists. Current configuration:`);
+                logger.log(`  Host:     ${chalk.cyan(existingConfig.host)}`);
+                logger.log(`  Port:     ${chalk.cyan(existingConfig.port)}`);
+                logger.log(`  Database: ${chalk.cyan(existingConfig.database)}`);
+                logger.log(`  User:     ${chalk.cyan(existingConfig.user)}`);
+                logger.log(`  SSL:      ${chalk.cyan(existingConfig.ssl ? 'Enabled' : 'Disabled')}`);
+                logger.log('');
+
+                const answer = await inquirer.prompt([
+                    {
+                        type: 'confirm',
+                        name: 'overwrite',
+                        message: 'Overwrite existing configuration?',
+                        default: false,
+                    },
+                ]);
+
+                if (!answer.overwrite) {
+                    logger.info('Operation cancelled');
+                    process.exit(0);
+                }
+            }
+
+            logger.log('');
+            logger.log('Enter database connection details:');
+            logger.log('');
+
+            const config = await inquirer.prompt<{
+                host: string;
+                port: number;
+                database: string;
+                user: string;
+                password: string;
+                ssl: boolean;
+            }>(
+                [
+                    {
+                        type: 'input',
+                        name: 'host',
+                        message: 'Database host:',
+                        default: existingConfig?.host || 'localhost',
+                        validate: (input: string) => input.trim() ? true : 'Host cannot be empty',
+                    },
+                    {
+                        type: 'input',
+                        name: 'port',
+                        message: 'Database port:',
+                        default: existingConfig?.port || 5432,
+                        validate: (input: string) => {
+                            const port = parseInt(input);
+                            return !isNaN(port) && port > 0 && port < 65536 ? true : 'Port must be a valid number between 1 and 65535';
+                        },
+                        filter: (input: string) => parseInt(input),
+                    },
+                    {
+                        type: 'input',
+                        name: 'database',
+                        message: 'Database name:',
+                        default: existingConfig?.database || 'postgres',
+                        validate: (input: string) => input.trim() ? true : 'Database name cannot be empty',
+                    },
+                    {
+                        type: 'input',
+                        name: 'user',
+                        message: 'Database user:',
+                        default: existingConfig?.user || 'postgres',
+                        validate: (input: string) => input.trim() ? true : 'User cannot be empty',
+                    },
+                    {
+                        type: 'password',
+                        name: 'password',
+                        message: 'Database password:',
+                        default: existingConfig?.password || '',
+                        mask: '*',
+                    },
+                    {
+                        type: 'confirm',
+                        name: 'ssl',
+                        message: 'Enable SSL connection?',
+                        default: existingConfig?.ssl || false,
+                    },
+                ] as any
+            );
+
+            logger.log('');
+            logger.startSpinner('Saving configuration...');
+
+            await saveEnvConfig(envName, {
+                host: config.host,
+                port: config.port,
+                database: config.database,
+                user: config.user,
+                password: config.password,
+                ssl: config.ssl,
+            });
+
+            logger.succeedSpinner('Configuration saved');
+            logger.log('');
+            logger.success('✅ Database configuration saved successfully!');
+            logger.log('');
+            logger.log(chalk.bold('Configuration Details:'));
+            logger.log(`  Environment: ${chalk.cyan(envName)}`);
+            logger.log(`  Host:        ${chalk.cyan(config.host)}`);
+            logger.log(`  Port:        ${chalk.cyan(config.port)}`);
+            logger.log(`  Database:    ${chalk.cyan(config.database)}`);
+            logger.log(`  User:        ${chalk.cyan(config.user)}`);
+            logger.log(`  SSL:         ${chalk.cyan(config.ssl ? 'Enabled' : 'Disabled')}`);
+            logger.log('');
+            logger.log(chalk.dim(`Config file: ${getConfigFilePath()}`)
+            );
+        } catch (error) {
+            logger.failSpinner();
+            logger.error(`Configuration failed: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        }
+    });
+
+program
+    .command('activate-env')
+    .description('Set the active environment')
+    .action(async () => {
+        try {
+            logger.header('🔧 Activate Environment');
+            const envs = await listEnvs();
+
+            if (envs.length === 0) {
+                logger.error('No environments configured');
+                logger.log('');
+                logger.log('Create an environment first:');
+                logger.log('  pnpm cli configure <env-name>');
+                process.exit(1);
+            }
+
+            const activeEnv = await getActiveEnv();
+            const { selectedEnv } = await inquirer.prompt([
+                {
+                    type: 'list',
+                    name: 'selectedEnv',
+                    message: 'Select active environment:',
+                    choices: envs.map(env => ({
+                        name: `${env}${env === activeEnv ? ' (currently active)' : ''}`,
+                        value: env,
+                    })),
+                    default: activeEnv || undefined,
+                } as any,
+            ]);
+
+            logger.log('');
+            logger.startSpinner(`Setting active environment to '${selectedEnv}'...`);
+            await setActiveEnv(selectedEnv);
+            logger.succeedSpinner('Active environment updated');
+
+            logger.log('');
+            logger.success(`✅ Active environment is now: ${chalk.cyan(selectedEnv)}`);
+        } catch (error) {
+            logger.failSpinner();
+            logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        }
+    });
+
+program
+    .command('list-env')
+    .description('List all configured environments')
+    .action(async () => {
+        try {
+            logger.header('📋 Configured Environments');
+            const envs = await listEnvs();
+            const activeEnv = await getActiveEnv();
+
+            if (envs.length === 0) {
+                logger.info('No environments configured yet');
+                logger.log('');
+                logger.log('Create one with:');
+                logger.log('  pnpm cli configure <env-name>');
+                return;
+            }
+
+            logger.log('');
+            logger.log(chalk.bold('Environments:'));
+            envs.forEach((env, index) => {
+                const isActive = env === activeEnv;
+                const icon = isActive ? chalk.green('●') : chalk.gray('○');
+                logger.log(`  ${icon} ${env}${isActive ? chalk.green(' (active)') : ''}`);
+            });
+
+            logger.log('');
+            logger.log(chalk.dim(`Config file: ${getConfigFilePath()}`));
+        } catch (error) {
+            logger.failSpinner();
+            logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        }
+    });
+
+program
+    .command('delete-env')
+    .description('Delete a configured environment')
+    .action(async () => {
+        try {
+            logger.header('🗑️  Delete Environment');
+            const envs = await listEnvs();
+
+            if (envs.length === 0) {
+                logger.error('No environments configured');
+                logger.log('');
+                logger.log('Create an environment first:');
+                logger.log('  pnpm cli configure <env-name>');
+                process.exit(1);
+            }
+
+            const { selectedEnv } = await inquirer.prompt([
+                {
+                    type: 'list',
+                    name: 'selectedEnv',
+                    message: 'Select environment to delete:',
+                    choices: envs,
+                } as any,
+            ]);
+
+            const envConfig = await getEnvConfig(selectedEnv);
+            const activeEnv = await getActiveEnv();
+
+            logger.log('');
+            logger.log(chalk.bold('Environment Details:'));
+            logger.log(`  Name:     ${chalk.cyan(selectedEnv)}`);
+            logger.log(`  Host:     ${chalk.cyan(envConfig?.host || 'N/A')}`);
+            logger.log(`  Database: ${chalk.cyan(envConfig?.database || 'N/A')}`);
+            logger.log(`  User:     ${chalk.cyan(envConfig?.user || 'N/A')}`);
+
+            if (selectedEnv === activeEnv) {
+                logger.log('');
+                logger.warn(`⚠️  This is the currently active environment!`);
+            }
+
+            logger.log('');
+            const { confirm } = await inquirer.prompt([
+                {
+                    type: 'confirm',
+                    name: 'confirm',
+                    message: `Delete environment '${selectedEnv}'?`,
+                    default: false,
+                } as any,
+            ]);
+
+            if (!confirm) {
+                logger.info('Deletion cancelled');
+                process.exit(0);
+            }
+
+            logger.log('');
+            logger.startSpinner('Deleting environment...');
+            await deleteEnvConfig(selectedEnv);
+            logger.succeedSpinner('Environment deleted');
+
+            logger.log('');
+            logger.success(`✅ Environment '${selectedEnv}' has been deleted`);
+
+            // Check if we deleted the active environment
+            const newActiveEnv = await getActiveEnv();
+            if (newActiveEnv && newActiveEnv !== selectedEnv) {
+                logger.log('');
+                logger.log(`Active environment is now: ${chalk.cyan(newActiveEnv)}`);
+            } else if (!newActiveEnv) {
+                logger.log('');
+                logger.warn('No active environment set. Configure a new one:');
+                logger.log('  pnpm cli configure <env-name>');
+            }
+        } catch (error) {
+            logger.failSpinner();
+            logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        }
+    });
 
 program
     .command('create')
@@ -338,7 +625,7 @@ program
     });
 
 program
-    .command('test')
+    .command('test-connection')
     .description('Test database connection and verify setup')
     .action(async () => {
         try {
@@ -356,7 +643,7 @@ program
             logger.success('✅ All checks passed! Database is ready.');
             logger.log('');
             logger.log(chalk.bold('Connection Details:'));
-            const config = getDatabaseConfig();
+            const config = await getDatabaseConfig();
             logger.log(`  Host:     ${chalk.cyan(config.host)}`);
             logger.log(`  Port:     ${chalk.cyan(config.port)}`);
             logger.log(`  Database: ${chalk.cyan(config.database)}`);

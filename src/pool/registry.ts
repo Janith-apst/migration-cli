@@ -26,7 +26,7 @@ export async function registerSchema(
     try {
         const result = client
             ? await client.query(query, values)
-            : await getPool().query(query, values);
+            : await (await getPool()).query(query, values);
 
         if (result.rowCount === 0) {
             throw new Error('Failed to insert record into schema_pool');
@@ -42,7 +42,7 @@ export async function registerSchema(
 }
 
 export async function listSchemas(statusFilter?: string): Promise<SchemaPoolRecord[]> {
-    const pool = getPool();
+    const pool = await getPool();
 
     let query = `
     SELECT 
@@ -76,7 +76,7 @@ export async function listSchemas(statusFilter?: string): Promise<SchemaPoolReco
 }
 
 export async function schemaExistsInPool(schemaName: string): Promise<boolean> {
-    const pool = getPool();
+    const pool = await getPool();
 
     const query = `
     SELECT 1 FROM common.schema_pool WHERE schema_name = $1
@@ -96,7 +96,7 @@ export async function deleteSchemaFromPool(
     schemaName: string,
     hardDelete: boolean = false
 ): Promise<void> {
-    const pool = getPool();
+    const pool = await getPool();
 
     const query = hardDelete
         ? 'DELETE FROM common.schema_pool WHERE schema_name = $1'
@@ -117,7 +117,7 @@ export async function deleteSchemaFromPool(
 }
 
 export async function getSchemaFromPool(schemaName: string): Promise<SchemaPoolRecord | null> {
-    const pool = getPool();
+    const pool = await getPool();
 
     const query = `
     SELECT 
