@@ -132,6 +132,7 @@ CREATE TABLE {{SCHEMA_NAME}}.products (
 	created_at timestamp DEFAULT CURRENT_TIMESTAMP NULL,
 	updated_at timestamp DEFAULT CURRENT_TIMESTAMP NULL,
 	"comments" varchar NULL,
+	prep_enabled BOOLEAN DEFAULT False,
 	CONSTRAINT products_pkey PRIMARY KEY (id)
 );
 
@@ -274,6 +275,8 @@ CREATE TABLE {{SCHEMA_NAME}}.component_material (
 	recycled_content jsonb NULL,
 	vendor_meta_data jsonb NULL,
 	prep_data jsonb NULL,
+	prep_errors JSONB NULL,
+	apco_material_id uuid NULL,
 	created_at timestamp DEFAULT CURRENT_TIMESTAMP NULL,
 	updated_at timestamp DEFAULT CURRENT_TIMESTAMP NULL,
 	CONSTRAINT component_material_pkey PRIMARY KEY (id)
@@ -298,6 +301,7 @@ CREATE TABLE {{SCHEMA_NAME}}.components (
 	is_reusable bool DEFAULT false NULL,
 	prep_data jsonb NULL,
 	vendor_meta_data jsonb NULL,
+	prep_errors JSONB NULL,
 	created_at timestamp DEFAULT CURRENT_TIMESTAMP NULL,
 	updated_at timestamp DEFAULT CURRENT_TIMESTAMP NULL,
 	mfr_region varchar(50) NULL,
