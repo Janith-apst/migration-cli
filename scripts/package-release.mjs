@@ -33,16 +33,18 @@ try {
     run('pnpm build');
 
     copy(join(projectRoot, 'dist'), join(stagingDir, 'dist'));
-    if (existsSync(join(projectRoot, 'templates'))) {
-        copy(join(projectRoot, 'templates'), join(stagingDir, 'templates'));
-    }
     copy(join(projectRoot, 'package.json'), join(stagingDir, 'package.json'));
     if (existsSync(join(projectRoot, 'pnpm-lock.yaml'))) {
         copy(join(projectRoot, 'pnpm-lock.yaml'), join(stagingDir, 'pnpm-lock.yaml'));
     }
 
-    // Install production deps into staging
+    console.log('Installing production dependencies...');
     run('pnpm install --prod --frozen-lockfile', stagingDir);
+
+    if (!existsSync(join(stagingDir, 'node_modules'))) {
+        throw new Error('node_modules not created in staging directory');
+    }
+    console.log('Dependencies installed successfully');
 
     const ext = osName === 'windows' ? 'zip' : 'tar.gz';
     const artifactName = `${appName}-${osName}-${archName}.${ext}`;
@@ -52,7 +54,8 @@ try {
     rmSync(`${artifactPath}.sha256`, { force: true });
 
     if (osName === 'windows') {
-        run(`powershell -NoProfile -Command "Compress-Archive -Path * -DestinationPath '${artifactPath}' -Force"`, stagingDir);
+        const winArtifactPath = artifactPath.replace(/\\/g, '/');
+        run(`powershell -NoProfile -Command "Compress-Archive -Path './*' -DestinationPath '${winArtifactPath}' -Force"`, stagingDir);
     } else {
         run(`tar -czf "${artifactPath}" -C "${stagingDir}" .`);
     }

@@ -115,7 +115,7 @@ $shim = @"
 @echo off
 setlocal
 set APP_HOME=$installRoot
-set NODE_PATH=%APP_HOME%\node_modules
+cd /d "%APP_HOME%"
 node "%APP_HOME%\dist\index.js" %*
 "@
 Set-Content -Path $shimPath -Value $shim -Encoding ASCII
