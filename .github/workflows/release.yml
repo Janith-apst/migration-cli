@@ -1,68 +1,69 @@
 name: Release
 
 on:
-    push:
-        tags:
-            - "v*"
-    workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
 
 permissions:
-    contents: write
+  contents: write
 
 jobs:
-    build:
-        name: Build (${{ matrix.os }} / ${{ matrix.arch }})
-        runs-on: ${{ matrix.os }}
-        strategy:
-            fail-fast: false
-            matrix:
-                include:
-                    - os: ubuntu-latest
-                      arch: x64
-                    - os: ubuntu-latest
-                      arch: arm64
-                    - os: macos-15-intel
-                      arch: x64
-                    - os: macos-latest
-                      arch: arm64
-                    - os: windows-latest
-                      arch: x64
-        steps:
-            - uses: actions/checkout@v4
+  build:
+    name: Build (${{ matrix.os }} / ${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x64
+          - os: macos-15-intel
+            arch: x64
+          - os: macos-latest
+            arch: arm64
+          - os: windows-latest
+            arch: x64
+    steps:
+      - uses: actions/checkout@v4
 
-            - uses: pnpm/action-setup@v4
-              with:
-                  version: 10.20.0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.20.0
 
-            - uses: actions/setup-node@v4
-              with:
-                  node-version: "20"
-                  cache: pnpm
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
 
-            - run: pnpm install --frozen-lockfile
-            - run: pnpm package
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm package
 
-            - uses: actions/upload-artifact@v4
-              with:
-                  name: artifacts-${{ matrix.os }}-${{ matrix.arch }}
-                  path: artifacts/**
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.os }}-${{ matrix.arch }}
+          path: artifacts/**
 
-    release:
-        name: Publish Release
-        needs: build
-        runs-on: ubuntu-latest
-        if: startsWith(github.ref, 'refs/tags/')
-        steps:
-            - uses: actions/checkout@v4
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
 
-            - uses: actions/download-artifact@v4
-              with:
-                  path: artifacts
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
 
-            - run: ls -R artifacts
+      - run: |
+          mkdir -p artifacts
+          find release-artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.sha256" \) -exec cp {} artifacts/ \;
+          ls -la artifacts/
 
-            - uses: softprops/action-gh-release@v1
-              with:
-                  files: artifacts/**/*
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
