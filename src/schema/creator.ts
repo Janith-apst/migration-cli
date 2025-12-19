@@ -7,6 +7,7 @@ import { logger } from '../utils/logger.js';
 export interface CreateSchemaOptions {
     force?: boolean;
     customName?: string;
+    suffix?: string;
 }
 
 export interface CreateSchemaResult {
@@ -17,7 +18,7 @@ export interface CreateSchemaResult {
 }
 
 
-export function generateSchemaName(customName?: string): string {
+export function generateSchemaName(customName?: string, suffix?: string): string {
     if (customName) {
         if (!/^account_[a-z0-9_]+$/.test(customName)) {
             throw new Error(
@@ -27,7 +28,7 @@ export function generateSchemaName(customName?: string): string {
         return customName;
     }
     const uniqueId = nanoid(8).toLowerCase().replace(/[^a-z0-9]/g, '');
-    return `account_${uniqueId}`;
+    return `account_${uniqueId}${suffix ? `_${suffix}` : ''}`;
 }
 
 export async function schemaExistsInDatabase(schemaName: string): Promise<boolean> {
@@ -71,7 +72,7 @@ export async function createSchema(options: CreateSchemaOptions = {}): Promise<C
     let schemaId: string | null = null;
 
     try {
-        schemaName = generateSchemaName(options.customName);
+        schemaName = generateSchemaName(options.customName, options.suffix);
         logger.info(`Preparing to create schema: ${schemaName}`);
 
         const existsInDb = await schemaExistsInDatabase(schemaName);
