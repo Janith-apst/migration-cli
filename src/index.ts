@@ -11,6 +11,7 @@ import { readBaseSchema, validateSQL, readSchemaFromPath, analyzeSchemaTemplate,
 import { saveEnvConfig, getEnvConfig, listEnvs, getConfigFilePath, getActiveEnv, setActiveEnv, deleteEnvConfig, setEnvTemplatePath, getEnvTemplatePath, clearEnvTemplatePath } from './config/manager.js';
 import { resolve } from 'path';
 import { access, constants } from 'fs/promises';
+import { version } from '../package.json' assert { type: 'json' };
 
 async function promptEnvSelection(message = 'Select environment:'): Promise<string> {
     const envs = await listEnvs();
@@ -35,7 +36,7 @@ const program = new Command();
 program
     .name('phantm')
     .description('PostgreSQL schema CLI tool')
-    .version('1.0.0');
+    .version(version, '-v, --version');
 
 program
     .command('configure <env-name>')
