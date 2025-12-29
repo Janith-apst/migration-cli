@@ -28,7 +28,7 @@ export async function readBaseSchema(): Promise<string> {
     }
 
     throw new Error(
-        'No template configured. Please run: migration-cli use <path-to-sql-file>'
+        'No template configured. Please run: phantm use <path-to-sql-file>'
     );
 }
 

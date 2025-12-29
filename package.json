@@ -1,11 +1,11 @@
 {
-  "name": "migration-cli",
+  "name": "phantm",
   "version": "1.0.0",
   "description": "PostgreSQL schema migration CLI tool",
   "main": "dist/index.js",
   "type": "module",
   "bin": {
-    "migration-cli": "./dist/index.js"
+    "phantm": "./dist/index.js"
   },
   "scripts": {
     "dev": "tsx src/index.ts",

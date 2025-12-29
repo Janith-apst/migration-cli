@@ -4,8 +4,8 @@ Requirements: Node.js >= 18.
 
 Release assets should be published to GitHub Releases as:
 
-- macOS/Linux: `migration-cli-<os>-<arch>.tar.gz` (os: `macos|linux`, arch: `x64|arm64`)
-- Windows: `migration-cli-windows-<arch>.zip` (arch: `x64|arm64`)
+- macOS/Linux: `phantm-<os>-<arch>.tar.gz` (os: `macos|linux`, arch: `x64|arm64`)
+- Windows: `phantm-windows-<arch>.zip` (arch: `x64|arm64`)
 
 ### macOS / Linux (per-user, default)
 
@@ -34,13 +34,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 System-wide install (requires elevated PowerShell):
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Janith-apst/migration-cli/main/scripts/install.ps1 -OutFile $env:TEMP/migration-cli-install.ps1; & $env:TEMP/migration-cli-install.ps1 -System"  # run in an admin shell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Janith-apst/migration-cli/main/scripts/install.ps1 -OutFile $env:TEMP/phantm-install.ps1; & $env:TEMP/phantm-install.ps1 -System"  # run in an admin shell
 ```
 
 Uninstall:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Janith-apst/migration-cli/main/scripts/install.ps1 -OutFile $env:TEMP/migration-cli-install.ps1; & $env:TEMP/migration-cli-install.ps1 -Uninstall"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Janith-apst/migration-cli/main/scripts/install.ps1 -OutFile $env:TEMP/phantm-install.ps1; & $env:TEMP/phantm-install.ps1 -Uninstall"
 ```
 
 ## Usage
@@ -54,12 +54,12 @@ After installation, configure your database environment and SQL template before 
 Add a new database environment:
 
 ```bash
-migration-cli configure <env-name>
+phantm configure <env-name>
 ```
 
 Example:
 ```bash
-migration-cli configure production
+phantm configure production
 ```
 
 You'll be prompted to enter:
@@ -75,7 +75,7 @@ You'll be prompted to enter:
 View all configured environments:
 
 ```bash
-migration-cli list-env
+phantm env list
 ```
 
 #### Activate Environment
@@ -83,7 +83,7 @@ migration-cli list-env
 Switch between configured environments:
 
 ```bash
-migration-cli activate-env
+phantm env activate
 ```
 
 #### Delete Environment
@@ -91,7 +91,7 @@ migration-cli activate-env
 Remove a configured environment:
 
 ```bash
-migration-cli delete-env
+phantm env delete
 ```
 
 #### Test Database Connection
@@ -99,7 +99,7 @@ migration-cli delete-env
 Verify your database connection and setup:
 
 ```bash
-migration-cli test-connection
+phantm env check
 ```
 
 ### 2. SQL Template Configuration
@@ -111,12 +111,12 @@ Before creating schemas, you need to configure a SQL template file.
 Configure a SQL template file for schema creation:
 
 ```bash
-migration-cli use <path-to-sql-file>
+phantm use <path-to-sql-file>
 ```
 
 Example:
 ```bash
-migration-cli use ./schemas/base-schema.sql
+phantm use ./schemas/base-schema.sql
 ```
 
 The command will:
@@ -130,7 +130,7 @@ The command will:
 Show current template configuration and details:
 
 ```bash
-migration-cli ddl info
+phantm ddl info
 ```
 
 #### Remove Template Configuration
@@ -138,14 +138,14 @@ migration-cli ddl info
 Remove the configured template:
 
 ```bash
-migration-cli unuse
+phantm unuse
 ```
 #### Validate Template
 
 Validate the configured SQL template structure:
 
 ```bash
-migration-cli validate
+phantm validate
 ```
 
 ### 3. Schema Creation
@@ -155,49 +155,42 @@ migration-cli validate
 Create a new schema with an auto-generated name:
 
 ```bash
-migration-cli create
+phantm create
 ```
 
-Create with a custom name (must start with "account_"):
+Create multiple schemas at once by specifying a count:
 
 ```bash
-migration-cli create --name account_mycustom
+phantm create <count>
 ```
 
-Force recreate if schema already exists:
+Example:
+```bash
+phantm create 10
+```
+
+Create with a custom name (single schema only, must start with "account_"):
 
 ```bash
-migration-cli create --force
+phantm create --name account_mycustom
+```
+
+Force recreate if schema already exists (single schema only):
+
+```bash
+phantm create --force
 ```
 
 Skip confirmation prompt:
 
 ```bash
-migration-cli create --yes
+phantm create --yes
 ```
 
-Combine options:
+Combine options (single schema only):
 
 ```bash
-migration-cli create --name account_prod --force --yes
-```
-
-#### Create Multiple Schemas
-
-Create multiple schemas at once:
-
-```bash
-migration-cli create-bulk <count>
-```
-
-Example:
-```bash
-migration-cli create-bulk 10
-```
-
-Skip confirmation:
-```bash
-migration-cli create-bulk 5 --yes
+phantm create --name account_prod --force --yes
 ```
 
 ### 4. Schema Management
@@ -207,15 +200,15 @@ migration-cli create-bulk 5 --yes
 List all schemas in the pool:
 
 ```bash
-migration-cli list
+phantm list
 ```
 
 Filter by status:
 
 ```bash
-migration-cli list --status AVAILABLE
-migration-cli list --status ALLOCATED
-migration-cli list --status DELETED
+phantm list --status AVAILABLE
+phantm list --status ALLOCATED
+phantm list --status DELETED
 ```
 
 #### Get Schema Information
@@ -223,37 +216,37 @@ migration-cli list --status DELETED
 Get detailed information about a specific schema:
 
 ```bash
-migration-cli info <schema-name>
+phantm info <schema-name>
 ```
 
 Example:
 ```bash
-migration-cli info account_abc12345
+phantm info account_abc12345
 ```
 
 ## Quick Start Example
 
 ```bash
 # 1. Configure database
-migration-cli configure production
+phantm configure production
 
 # 2. Test connection
-migration-cli test-connection
+phantm env check
 
 # 3. Set up SQL template
-migration-cli use ./my-schema.sql
+phantm use ./my-schema.sql
 
 # 4. Validate template
-migration-cli validate
+phantm validate
 
 # 5. Create a schema
-migration-cli create
+phantm create
 
 # 6. List all schemas
-migration-cli list
+phantm list
 ```
 
 ## Configuration Files
 
-- Config location: `~/.migration-cli/config.json`
+- Config location: `~/.phantm/config.json`
 - Stores: database credentials, active environment, and SQL template path

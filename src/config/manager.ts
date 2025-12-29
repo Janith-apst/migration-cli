@@ -19,7 +19,7 @@ export interface ConfigFile {
     [envName: string]: DatabaseConfig | string | undefined;
 }
 
-const CONFIG_DIR = path.join(os.homedir(), '.migration-cli');
+const CONFIG_DIR = path.join(os.homedir(), '.phantm');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
 export async function ensureConfigDir(): Promise<void> {

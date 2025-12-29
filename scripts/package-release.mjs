@@ -8,7 +8,7 @@ import crypto from 'crypto';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, '..');
 const pkg = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8'));
-const appName = pkg.name || 'migration-cli';
+const appName = pkg.name || 'phantm';
 
 const osMap = { darwin: 'macos', linux: 'linux', win32: 'windows' };
 const archMap = { x64: 'x64', arm64: 'arm64' };

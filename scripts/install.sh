@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="migration-cli"
+APP_NAME="phantm"
 REPO="Janith-apst/migration-cli"
 DEFAULT_VERSION="latest"
 ASSET_EXT="tar.gz"
@@ -21,7 +21,7 @@ Options:
   -h, --help            Show this help
 
 This installer expects GitHub release assets named:
-  migration-cli-<os>-<arch>.tar.gz
+  phantm-<os>-<arch>.tar.gz
 where <os> is one of linux|macos and <arch> is x64|arm64.
 EOF
 }
