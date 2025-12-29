@@ -3,15 +3,18 @@
 import { Command } from 'commander';
 import inquirer from 'inquirer';
 import chalk from 'chalk';
+import { createRequire } from 'module';
+import { resolve } from 'path';
+import { access, constants } from 'fs/promises';
 import { testConnection, verifyCommonSchema, closePool, getDatabaseConfig } from './db/connection.js';
 import { createSchema, validateSchemaStructure } from './schema/creator.js';
 import { listSchemas, getSchemaFromPool } from './pool/registry.js';
 import { logger } from './utils/logger.js';
 import { readBaseSchema, validateSQL, readSchemaFromPath, analyzeSchemaTemplate, generateSchemaSQL } from './schema/parser.js';
 import { saveEnvConfig, getEnvConfig, listEnvs, getConfigFilePath, getActiveEnv, setActiveEnv, deleteEnvConfig, setEnvTemplatePath, getEnvTemplatePath, clearEnvTemplatePath } from './config/manager.js';
-import { resolve } from 'path';
-import { access, constants } from 'fs/promises';
-import { version } from '../package.json' assert { type: 'json' };
+
+const require = createRequire(import.meta.url);
+const { version } = require('../package.json');
 
 async function promptEnvSelection(message = 'Select environment:'): Promise<string> {
     const envs = await listEnvs();
