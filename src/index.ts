@@ -155,8 +155,8 @@ program
             logger.log(`  User:        ${chalk.cyan(config.user)}`);
             logger.log(`  SSL:         ${chalk.cyan(config.ssl ? 'Enabled' : 'Disabled')}`);
             logger.log('');
-            logger.log(chalk.dim(`Config file: ${getConfigFilePath()}`)
-            );
+            // logger.log(chalk.dim(`Config file: ${getConfigFilePath()}`)
+            // );
         } catch (error) {
             logger.failSpinner();
             logger.error(`Configuration failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -194,7 +194,7 @@ envCommand
             });
 
             logger.log('');
-            logger.log(chalk.dim(`Config file: ${getConfigFilePath()}`));
+            // logger.log(chalk.dim(`Config file: ${getConfigFilePath()}`));
         } catch (error) {
             logger.failSpinner();
             logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
