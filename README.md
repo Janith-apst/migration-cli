@@ -119,39 +119,35 @@ Example:
 phantm use ./schemas/base-schema.sql
 ```
 
-The command will:
-- Validate the file path
-- Analyze the SQL structure
-- Show a preview of types, tables, and indexes
-- Save the path to your config
+The command will prompt you to pick an environment, validate the file, preview the schema, and save the path for that environment only.
 
 #### View Template Info
 
-Show current template configuration and details:
+Show current template configuration, schema info, and DDL for a chosen environment:
 
 ```bash
-phantm ddl info
+phantm info schema <schema-name>
+phantm info template
+phantm info ddl
 ```
 
 #### Remove Template Configuration
 
-Remove the configured template:
-
+Remove the configured template for a chosen environment:
 ```bash
 phantm unuse
 ```
+
 #### Validate Template
 
-Validate the configured SQL template structure:
-
+Validate the configured SQL template structure for a chosen environment:
 ```bash
 phantm validate
 ```
-
-### 3. Schema Creation
+You will be prompted to select the environment whose template should be validated.
 
 #### Create Single Schema
-
+Show current template configuration and details for a chosen environment:
 Create a new schema with an auto-generated name:
 
 ```bash
@@ -216,7 +212,7 @@ phantm list --status DELETED
 Get detailed information about a specific schema:
 
 ```bash
-phantm info <schema-name>
+phantm info schema <schema-name>
 ```
 
 Example:

@@ -7,10 +7,28 @@ import { testConnection, verifyCommonSchema, closePool, getDatabaseConfig } from
 import { createSchema, validateSchemaStructure } from './schema/creator.js';
 import { listSchemas, getSchemaFromPool } from './pool/registry.js';
 import { logger } from './utils/logger.js';
-import { readBaseSchema, validateSQL, readSchemaFromPath, analyzeSchemaTemplate } from './schema/parser.js';
-import { saveEnvConfig, getEnvConfig, listEnvs, getConfigFilePath, getActiveEnv, setActiveEnv, deleteEnvConfig, setTemplatePath, getTemplatePath, clearTemplatePath } from './config/manager.js';
+import { readBaseSchema, validateSQL, readSchemaFromPath, analyzeSchemaTemplate, generateSchemaSQL } from './schema/parser.js';
+import { saveEnvConfig, getEnvConfig, listEnvs, getConfigFilePath, getActiveEnv, setActiveEnv, deleteEnvConfig, setEnvTemplatePath, getEnvTemplatePath, clearEnvTemplatePath } from './config/manager.js';
 import { resolve } from 'path';
 import { access, constants } from 'fs/promises';
+
+async function promptEnvSelection(message = 'Select environment:'): Promise<string> {
+    const envs = await listEnvs();
+    if (envs.length === 0) {
+        throw new Error('No environments configured. Run phantm configure <env-name> first.');
+    }
+    const activeEnv = await getActiveEnv();
+    const { selectedEnv } = await inquirer.prompt([
+        {
+            type: 'list',
+            name: 'selectedEnv',
+            message,
+            choices: envs,
+            default: activeEnv || undefined,
+        } as any,
+    ]);
+    return selectedEnv;
+}
 
 const program = new Command();
 
@@ -26,7 +44,6 @@ program
         try {
             logger.header(`⚙️  Configure Database - ${envName}`);
 
-            // Check if environment already exists
             const existingConfig = await getEnvConfig(envName);
             if (existingConfig) {
                 logger.log('');
@@ -330,8 +347,16 @@ program
                 process.exit(1);
             }
 
-            // Single schema mode
             if (schemaCount === 1) {
+                const envName = (await getActiveEnv()) || (await promptEnvSelection('Select environment for schema creation:'));
+                const templatePath = await getEnvTemplatePath(envName);
+                if (!templatePath) {
+                    logger.log('');
+                    logger.warn(`No template configured for environment '${envName}'.`);
+                    logger.log(`Run ${chalk.cyan('phantm use <path-to-sql-file>')} to configure one.`);
+                    process.exit(1);
+                }
+
                 logger.header('🚀 Schema Creation');
                 logger.startSpinner('Testing database connection...');
                 await testConnection();
@@ -361,6 +386,7 @@ program
 
                 logger.divider();
                 const result = await createSchema({
+                    envName,
                     force: options.force,
                     customName: options.name,
                     suffix: options.suffix,
@@ -388,6 +414,15 @@ program
                 }
             } else {
                 // Bulk creation mode
+                const envName = (await getActiveEnv()) || (await promptEnvSelection('Select environment for schema creation:'));
+                const templatePath = await getEnvTemplatePath(envName);
+                if (!templatePath) {
+                    logger.log('');
+                    logger.warn(`No template configured for environment '${envName}'.`);
+                    logger.log(`Run ${chalk.cyan('phantm use <path-to-sql-file>')} to configure one.`);
+                    process.exit(1);
+                }
+
                 logger.header(`🚀 Bulk Schema Creation (${schemaCount} schemas)`);
 
                 logger.startSpinner('Testing database connection...');
@@ -426,6 +461,7 @@ program
                     logger.log(`\n${chalk.bold(`[${i}/${schemaCount}]`)} Creating schema...`);
 
                     const result = await createSchema({
+                        envName,
                         force: false,
                         suffix: options.suffix,
                     });
@@ -540,11 +576,12 @@ program
         try {
             logger.header('🔍 Template Validation');
 
-            const templatePath = await getTemplatePath();
+            const envName = await promptEnvSelection('Select environment to validate template for:');
+            const templatePath = await getEnvTemplatePath(envName);
 
             if (!templatePath) {
                 logger.log('');
-                logger.warn('No template configured');
+                logger.warn(`No template configured for environment '${envName}'.`);
                 logger.log('');
                 logger.log(`Run ${chalk.cyan('phantm use <path-to-sql-file>')} to configure a template.`);
                 process.exit(1);
@@ -556,7 +593,7 @@ program
             logger.log('');
 
             logger.startSpinner('Reading template...');
-            const template = await readBaseSchema();
+            const template = await readBaseSchema(envName);
             logger.succeedSpinner('Template loaded');
 
             logger.startSpinner('Validating SQL structure...');
@@ -584,8 +621,12 @@ program
         }
     });
 
-program
-    .command('info <schema-name>')
+const infoCommand = program
+    .command('info')
+    .description('Show information');
+
+infoCommand
+    .command('schema <schema-name>')
     .description('Get detailed information about a schema')
     .action(async (schemaName) => {
         try {
@@ -638,6 +679,35 @@ program
             process.exit(1);
         } finally {
             await closePool();
+        }
+    });
+
+infoCommand
+    .command('ddl')
+    .description('Show schema creation DDL from template (env-specific)')
+    .action(async () => {
+        try {
+            const envName = await promptEnvSelection();
+
+            const templatePath = await getEnvTemplatePath(envName);
+
+            if (!templatePath) {
+                logger.warn(`No template set for environment '${envName}'. Run 'phantm use <path>' to set one.`);
+                return;
+            }
+
+            logger.header('📜 Schema Creation DDL');
+            logger.info(`Environment: ${envName}`);
+            logger.info(`Template: ${templatePath}`);
+
+            const schemaSQL = await generateSchemaSQL('migration_pool_schema', envName);
+
+            logger.divider();
+            logger.log(schemaSQL);
+            logger.divider();
+        } catch (error) {
+            logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
         }
     });
 
@@ -745,11 +815,13 @@ program
             logger.divider();
             logger.log('');
 
+            const envName = await promptEnvSelection('Select environment to associate this template with:');
+
             const answer = await inquirer.prompt([
                 {
                     type: 'confirm',
                     name: 'confirm',
-                    message: 'Save this template for future use?',
+                    message: `Save this template for environment '${envName}'?`,
                     default: true,
                 },
             ]);
@@ -760,10 +832,10 @@ program
             }
 
             logger.startSpinner('Saving template configuration...');
-            await setTemplatePath(resolvedPath);
+            await setEnvTemplatePath(envName, resolvedPath);
             logger.succeedSpinner('Template configuration saved');
             logger.log('');
-            logger.success('✅ Template configured successfully!');
+            logger.success(`✅ Template configured for environment '${envName}'`);
             logger.log('');
             logger.log(`You can now use ${chalk.cyan('phantm create <schema-name>')} to create schemas.`);
             logger.log(`Config saved to: ${chalk.gray(getConfigFilePath())}`);
@@ -774,16 +846,17 @@ program
         }
     });
 
-program
-    .command('ddl info')
-    .description('Show current SQL template configuration')
+infoCommand
+    .command('template')
+    .description('Show SQL template configuration for an environment')
     .action(async () => {
         try {
-            logger.header('📄 Template Configuration');
-            const templatePath = await getTemplatePath();
+            const envName = await promptEnvSelection('Select environment to view template for:');
+            logger.header(`📄 Template Configuration (${envName})`);
+            const templatePath = await getEnvTemplatePath(envName);
             if (!templatePath) {
                 logger.log('');
-                logger.warn('No template configured');
+                logger.warn(`No template configured for environment '${envName}'.`);
                 logger.log('');
                 logger.log(`Run ${chalk.cyan('phantm use <path-to-sql-file>')} to configure a template.`);
                 process.exit(0);
@@ -828,14 +901,15 @@ program
 
 program
     .command('template clear')
-    .description('Clear the configured SQL template')
+    .description('Clear the configured SQL template for an environment')
     .action(async () => {
         try {
-            logger.header('🗑️  Clear Template Configuration');
-            const templatePath = await getTemplatePath();
+            const envName = await promptEnvSelection('Select environment to clear template for:');
+            logger.header(`🗑️  Clear Template Configuration (${envName})`);
+            const templatePath = await getEnvTemplatePath(envName);
             if (!templatePath) {
                 logger.log('');
-                logger.info('No template is currently configured');
+                logger.info(`No template is configured for environment '${envName}'.`);
                 process.exit(0);
             }
 
@@ -859,7 +933,7 @@ program
             }
 
             logger.startSpinner('Clearing template configuration...');
-            await clearTemplatePath();
+            await clearEnvTemplatePath(envName);
             logger.succeedSpinner('Template configuration cleared');
 
             logger.log('');
@@ -875,14 +949,15 @@ program
 
 program
     .command('unuse')
-    .description('Remove the configured SQL template')
+    .description('Remove the configured SQL template for an environment')
     .action(async () => {
         try {
-            logger.header('🗑️  Remove SQL Template');
-            const templatePath = await getTemplatePath();
+            const envName = await promptEnvSelection('Select environment to remove template for:');
+            logger.header(`🗑️  Remove SQL Template (${envName})`);
+            const templatePath = await getEnvTemplatePath(envName);
             if (!templatePath) {
                 logger.log('');
-                logger.info('No template is currently configured');
+                logger.info(`No template is configured for environment '${envName}'.`);
                 process.exit(0);
             }
 
@@ -895,7 +970,7 @@ program
                 {
                     type: 'confirm',
                     name: 'confirm',
-                    message: 'Remove this template configuration?',
+                    message: `Remove the template for environment '${envName}'?`,
                     default: false,
                 },
             ]);
@@ -906,7 +981,7 @@ program
             }
 
             logger.startSpinner('Removing template configuration...');
-            await clearTemplatePath();
+            await clearEnvTemplatePath(envName);
             logger.succeedSpinner('Template configuration removed');
 
             logger.log('');

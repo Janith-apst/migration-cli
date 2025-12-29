@@ -1,5 +1,5 @@
 import { readFile } from 'fs/promises';
-import { getTemplatePath } from '../config/manager.js';
+import { getEnvTemplatePath } from '../config/manager.js';
 
 export interface SchemaAnalysis {
     authorization: string | null;
@@ -21,14 +21,14 @@ export async function readSchemaFromPath(filePath: string): Promise<string> {
     }
 }
 
-export async function readBaseSchema(): Promise<string> {
-    const configuredPath = await getTemplatePath();
+export async function readBaseSchema(envName: string): Promise<string> {
+    const configuredPath = await getEnvTemplatePath(envName);
     if (configuredPath) {
         return readSchemaFromPath(configuredPath);
     }
 
     throw new Error(
-        'No template configured. Please run: phantm use <path-to-sql-file>'
+        `No template configured for environment '${envName}'. Please run: phantm use <path-to-sql-file>`
     );
 }
 
@@ -76,8 +76,8 @@ export function replaceSchemaName(template: string, schemaName: string): string 
     return result;
 }
 
-export async function generateSchemaSQL(schemaName: string): Promise<string> {
-    const template = await readBaseSchema();
+export async function generateSchemaSQL(schemaName: string, envName: string): Promise<string> {
+    const template = await readBaseSchema(envName);
     return replaceSchemaName(template, schemaName);
 }
 

@@ -11,11 +11,11 @@ export interface DatabaseConfig {
     ssl?: boolean;
     createdAt?: string;
     updatedAt?: string;
+    templatePath?: string;
 }
 
 export interface ConfigFile {
     activeEnv?: string;
-    templatePath?: string;
     [envName: string]: DatabaseConfig | string | undefined;
 }
 
@@ -127,34 +127,51 @@ export function getConfigFilePath(): string {
 }
 
 export async function setTemplatePath(filePath: string): Promise<void> {
+    throw new Error('Use setEnvTemplatePath(envName, filePath) instead');
+}
+
+export async function getTemplatePath(): Promise<string | null> {
+    throw new Error('Use getEnvTemplatePath(envName) instead');
+}
+
+export async function clearTemplatePath(): Promise<void> {
+    throw new Error('Use clearEnvTemplatePath(envName) instead');
+}
+
+export async function setEnvTemplatePath(envName: string, filePath: string): Promise<void> {
     await ensureConfigDir();
+    const config = await readConfig();
+    const envConfig = await getEnvConfig(envName);
+    if (!envConfig) {
+        throw new Error(`Environment '${envName}' not found in config`);
+    }
+
     try {
         await fs.access(filePath, fs.constants.R_OK);
     } catch (error) {
         throw new Error(`Template file not accessible: ${filePath}`);
     }
 
-    const config = await readConfig();
-    config.templatePath = path.resolve(filePath);
-    try {
-        await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
-    } catch (error) {
-        throw new Error(`Failed to save template path: ${error}`);
-    }
+    config[envName] = {
+        ...(config[envName] as DatabaseConfig),
+        templatePath: path.resolve(filePath),
+    };
+
+    await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
 }
 
-export async function getTemplatePath(): Promise<string | null> {
-    const config = await readConfig();
-    return config.templatePath || null;
+export async function getEnvTemplatePath(envName: string): Promise<string | null> {
+    const envConfig = await getEnvConfig(envName);
+    return envConfig?.templatePath || null;
 }
 
-export async function clearTemplatePath(): Promise<void> {
+export async function clearEnvTemplatePath(envName: string): Promise<void> {
     const config = await readConfig();
-    delete config.templatePath;
-
-    try {
-        await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
-    } catch (error) {
-        throw new Error(`Failed to clear template path: ${error}`);
+    if (!config[envName]) {
+        throw new Error(`Environment '${envName}' not found in config`);
     }
+    const envConfig = config[envName] as DatabaseConfig;
+    delete envConfig.templatePath;
+    config[envName] = envConfig;
+    await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
 }

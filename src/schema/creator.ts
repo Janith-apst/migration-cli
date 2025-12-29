@@ -8,6 +8,7 @@ export interface CreateSchemaOptions {
     force?: boolean;
     customName?: string;
     suffix?: string;
+    envName: string;
 }
 
 export interface CreateSchemaResult {
@@ -64,7 +65,7 @@ export async function dropSchema(schemaName: string): Promise<void> {
     }
 }
 
-export async function createSchema(options: CreateSchemaOptions = {}): Promise<CreateSchemaResult> {
+export async function createSchema(options: CreateSchemaOptions): Promise<CreateSchemaResult> {
     const pool = await getPool();
     const client = await pool.connect();
 
@@ -108,8 +109,12 @@ export async function createSchema(options: CreateSchemaOptions = {}): Promise<C
             }
         }
 
+        if (!options.envName) {
+            throw new Error('Environment name is required to generate schema SQL');
+        }
+
         logger.startSpinner('Generating SQL from template...');
-        const sql = await generateSchemaSQL(schemaName);
+        const sql = await generateSchemaSQL(schemaName, options.envName);
         validateSQL(sql);
         logger.succeedSpinner('SQL generated and validated');
         await client.query('BEGIN');
