@@ -7,7 +7,7 @@ import { createRequire } from 'module';
 import { resolve } from 'path';
 import { access, constants } from 'fs/promises';
 import { testConnection, verifyCommonSchema, closePool, getDatabaseConfig } from './db/connection.js';
-import { createSchema, validateSchemaStructure } from './schema/creator.js';
+import { createSchema, validateSchemaStructure, deleteSchemaComplete } from './schema/creator.js';
 import { listSchemas, getSchemaFromPool } from './pool/registry.js';
 import { logger } from './utils/logger.js';
 import { readBaseSchema, validateSQL, readSchemaFromPath, analyzeSchemaTemplate, generateSchemaSQL } from './schema/parser.js';
@@ -564,6 +564,98 @@ program
 
             logger.divider();
             logger.log(`${chalk.bold('Total:')} ${schemas.length} schema(s)`);
+        } catch (error) {
+            logger.failSpinner();
+            logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        } finally {
+            await closePool();
+        }
+    });
+
+program
+    .command('delete <schema-name>')
+    .description('Delete a schema and remove it from the schema pool')
+    .option('-y, --yes', 'Skip confirmation prompt')
+    .action(async (schemaName, options) => {
+        try {
+            logger.header('🗑️  Delete Schema');
+
+            if (!/^account_[a-z0-9_]+$/.test(schemaName)) {
+                logger.error('Schema name must start with "account_" and contain only lowercase letters, numbers, and underscores');
+                process.exit(1);
+            }
+
+            logger.startSpinner('Testing database connection...');
+            await testConnection();
+            logger.succeedSpinner('Database connection successful');
+
+            logger.startSpinner('Verifying common schema...');
+            await verifyCommonSchema();
+            logger.succeedSpinner('Common schema verified');
+
+            logger.startSpinner('Checking schema existence...');
+            const schemaInfo = await getSchemaFromPool(schemaName);
+            logger.succeedSpinner('Schema check complete');
+
+            if (!schemaInfo) {
+                logger.log('');
+                logger.warn(`Schema '${schemaName}' not found in schema pool`);
+
+                const pool = await (await import('./db/connection.js')).getPool();
+                const dbCheck = await pool.query(
+                    'SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1',
+                    [schemaName]
+                );
+
+                if (dbCheck.rowCount === 0) {
+                    logger.error(`Schema '${schemaName}' does not exist in database or pool`);
+                    process.exit(1);
+                }
+
+                logger.warn(`Schema exists in database but not in pool. Will attempt to delete from database.`);
+            }
+
+            if (schemaInfo) {
+                logger.log('');
+                logger.log(chalk.bold('Schema Details:'));
+                logger.log(`  Name:       ${chalk.cyan(schemaInfo.schema_name)}`);
+                logger.log(`  ID:         ${chalk.cyan(schemaInfo.schema_id || 'N/A')}`);
+                logger.log(`  Status:     ${getStatusColor(schemaInfo.status)}${schemaInfo.status}${chalk.reset()}`);
+                logger.log(`  Account ID: ${schemaInfo.account_id || chalk.gray('N/A')}`);
+                logger.log(`  Created:    ${schemaInfo.created_at ? new Date(schemaInfo.created_at).toLocaleString() : 'N/A'}`);
+                logger.log('');
+            }
+
+            if (!options.yes) {
+                logger.log('');
+                logger.warn('⚠️  This action will:');
+                logger.log('  • Drop the schema and all its objects from the database');
+                logger.log('  • Remove the schema record from the schema_pool table');
+                logger.log('  • This action cannot be undone!');
+                logger.log('');
+
+                const answer = await inquirer.prompt([
+                    {
+                        type: 'confirm',
+                        name: 'proceed',
+                        message: `Delete schema '${schemaName}'?`,
+                        default: false,
+                    },
+                ]);
+
+                if (!answer.proceed) {
+                    logger.info('Deletion cancelled');
+                    process.exit(0);
+                }
+            }
+
+            logger.log('');
+            logger.divider();
+            await deleteSchemaComplete(schemaName);
+            logger.divider();
+            logger.log('');
+            logger.success(`✅ Schema '${chalk.cyan(schemaName)}' has been successfully deleted`);
         } catch (error) {
             logger.failSpinner();
             logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
