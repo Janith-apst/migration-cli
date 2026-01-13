@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
+import inquirer from 'inquirer';
 
 export interface DatabaseConfig {
     host: string;
@@ -12,6 +13,9 @@ export interface DatabaseConfig {
     createdAt?: string;
     updatedAt?: string;
     templatePath?: string;
+    region?: string;
+    awsAccessKeyId?: string;
+    awsSecretAccessKey?: string;
 }
 
 export interface ConfigFile {
@@ -175,3 +179,79 @@ export async function clearEnvTemplatePath(envName: string): Promise<void> {
     config[envName] = envConfig;
     await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
 }
+
+export async function configureAWSCredentials(
+    accessKeyId: string,
+    secretAccessKey: string,
+    region: string
+): Promise<void> {
+    const credentialsPath = path.join(os.homedir(), '.aws', 'credentials');
+    const configPath = path.join(os.homedir(), '.aws', 'config');
+
+    try {
+        await fs.mkdir(path.dirname(credentialsPath), { recursive: true });
+        await fs.mkdir(path.dirname(configPath), { recursive: true });
+    } catch (error) {
+        throw new Error(`Failed to create AWS config directories: ${error}`);
+    }
+
+    const credentialsContent = `[default]
+        aws_access_key_id = ${accessKeyId}
+        aws_secret_access_key = ${secretAccessKey}
+        `;
+            const configContent = `[default]
+        region = ${region}
+        output = json
+        `;
+
+    try {
+        await fs.writeFile(credentialsPath, credentialsContent, 'utf-8');
+        await fs.writeFile(configPath, configContent, 'utf-8');
+    } catch (error) {
+        throw new Error(`Failed to write AWS config files: ${error}`);
+    }
+
+}
+
+export const configureAWSCredentialsPrompt = async (envName: string): Promise<void> => {
+    const answers = await inquirer.prompt([
+        {
+            type: 'input',
+            name: 'awsKey',
+            message: 'Enter AWS Access Key ID (optional):',
+        },
+        {
+            type: 'password',
+            name: 'awsSecret',
+            message: 'Enter AWS Secret Access Key (optional):',
+        },
+        {
+            type: 'input',
+            name: 'awsRegion',
+            message: 'Enter AWS Region (optional):',
+            default: 'us-east-1',
+        },
+    ]);
+
+    if (answers.awsSecret && answers.awsKey && answers.awsRegion) {
+        const config = await readConfig();
+        const envConfig = config[envName] as DatabaseConfig;
+
+        if (!envConfig) {
+            throw new Error(`Environment '${envName}' not found`);
+        }
+
+        config[envName] = {
+            ...envConfig,
+            region: answers.awsRegion,
+            awsAccessKeyId: answers.awsKey,
+            awsSecretAccessKey: answers.awsSecret,
+            updatedAt: new Date().toISOString(),
+        };
+
+        await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
+        console.log('AWS credentials configured successfully.');
+    } else {
+        console.log('AWS configuration skipped.');
+    }
+};

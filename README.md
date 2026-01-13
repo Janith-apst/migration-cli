@@ -242,7 +242,54 @@ phantm create
 phantm list
 ```
 
+## AWS DynamoDB Integration
+
+The migration CLI integrates with AWS DynamoDB to create auxiliary data tables alongside your PostgreSQL schemas. When you create a schema, you can optionally create a corresponding DynamoDB table with the naming format: `${environment}-prep-data-${accountCode}`.
+
+### Configure AWS Credentials
+
+When configuring an environment, you'll be prompted to optionally add AWS credentials:
+
+```bash
+phantm configure <env-name>
+```
+
+After entering database details, you'll be asked:
+- Do you want to configure AWS credentials? (yes/no)
+- If yes:
+  - AWS Access Key ID
+  - AWS Secret Access Key
+  - AWS Region (default: us-east-1)
+
+### Integrated Schema + DynamoDB Creation
+
+When creating a schema, if AWS is configured, a DynamoDB table is automatically created for the schema:
+
+```bash
+phantm create
+```
+
+The workflow:
+1. Schema is created (e.g., `account_ps97wn2h`)
+2. Record is inserted into `schema_pool` table
+3. If AWS is configured, a DynamoDB table is created with format: `${environment}-prep-data-${accountCode}`
+   - Example: `dev-prep-data-ps97wn2h`
+   - Partition key: `product_id` (String)
+   - Attributes available: `prep_project` (for JSON data), `created_at` (timestamp)
+
+### DynamoDB Tables
+
+List all tables in the configured region:
+
+```bash
+phantm dynamodb:list-tables
+```
+
+### Setup Guide
+
+For detailed instructions on setting up AWS IAM users and configuring DynamoDB integration, see [AWS_SETUP_GUIDE.md](./AWS_SETUP_GUIDE.md).
+
 ## Configuration Files
 
 - Config location: `~/.phantm/config.json`
-- Stores: database credentials, active environment, and SQL template path
+- Stores: database credentials, AWS credentials, active environment, and SQL template path

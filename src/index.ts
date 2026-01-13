@@ -12,6 +12,8 @@ import { listSchemas, getSchemaFromPool } from './pool/registry.js';
 import { logger } from './utils/logger.js';
 import { readBaseSchema, validateSQL, readSchemaFromPath, analyzeSchemaTemplate, generateSchemaSQL } from './schema/parser.js';
 import { saveEnvConfig, getEnvConfig, listEnvs, getConfigFilePath, getActiveEnv, setActiveEnv, deleteEnvConfig, setEnvTemplatePath, getEnvTemplatePath, clearEnvTemplatePath } from './config/manager.js';
+import type { DatabaseConfig } from './config/manager.js';
+import { DynamoDBClient, CreateTableCommand, ListTablesCommand } from '@aws-sdk/client-dynamodb';
 
 const require = createRequire(import.meta.url);
 const { version } = require('../package.json');
@@ -32,6 +34,63 @@ async function promptEnvSelection(message = 'Select environment:'): Promise<stri
         } as any,
     ]);
     return selectedEnv;
+}
+
+type AwsReadyConfig = DatabaseConfig & {
+    region: string;
+    awsAccessKeyId: string;
+    awsSecretAccessKey: string;
+};
+
+function getAwsConfig(config: DatabaseConfig | null | undefined): AwsReadyConfig | null {
+    if (config?.region && config.awsAccessKeyId && config.awsSecretAccessKey) {
+        return config as AwsReadyConfig;
+    }
+    return null;
+}
+
+async function createDynamoTableForSchema(envName: string, schemaName: string, config: AwsReadyConfig): Promise<void> {
+    const accountCode = schemaName.replace('account_', '').replace(/_/g, '');
+    const tableName = `${envName}-prep-data-${accountCode}`;
+
+    logger.log('');
+    logger.log(chalk.bold('DynamoDB Table:'));
+    logger.log(`  Table Name: ${chalk.cyan(tableName)}`);
+    logger.log(`  Region:     ${chalk.cyan(config.region)}`);
+    logger.log('');
+
+    try {
+        logger.startSpinner('Creating DynamoDB table...');
+        const dynamoDB = new DynamoDBClient({
+            region: config.region,
+            credentials: {
+                accessKeyId: config.awsAccessKeyId,
+                secretAccessKey: config.awsSecretAccessKey,
+            },
+        });
+
+        await dynamoDB.send(new CreateTableCommand({
+            TableName: tableName,
+            KeySchema: [
+                { AttributeName: 'product_id', KeyType: 'HASH' },
+            ],
+            AttributeDefinitions: [
+                { AttributeName: 'product_id', AttributeType: 'S' },
+            ],
+            ProvisionedThroughput: {
+                ReadCapacityUnits: 5,
+                WriteCapacityUnits: 5,
+            },
+        }));
+
+        logger.succeedSpinner('DynamoDB table created successfully');
+        logger.log('');
+        logger.success(`✅ DynamoDB table '${chalk.cyan(tableName)}' created!`);
+    } catch (dynamoError) {
+        logger.failSpinner();
+        logger.error(`DynamoDB table creation failed for '${tableName}': ${dynamoError instanceof Error ? dynamoError.message : String(dynamoError)}`);
+        logger.warn('Schema was created successfully, but DynamoDB table creation failed.');
+    }
 }
 
 const program = new Command();
@@ -159,6 +218,60 @@ program
             logger.log(`  User:        ${chalk.cyan(config.user)}`);
             logger.log(`  SSL:         ${chalk.cyan(config.ssl ? 'Enabled' : 'Disabled')}`);
             logger.log('');
+
+            const awsAnswer = await inquirer.prompt([
+                {
+                    type: 'confirm',
+                    name: 'configureAWS',
+                    message: 'Do you want to configure AWS credentials for DynamoDB? (optional)',
+                    default: false,
+                },
+            ]);
+
+            if (awsAnswer.configureAWS) {
+                logger.log('');
+                logger.log(chalk.bold('AWS Configuration:'));
+                logger.log('');
+
+                const awsConfig = await inquirer.prompt([
+                    {
+                        type: 'input',
+                        name: 'accessKeyId',
+                        message: 'AWS Access Key ID:',
+                        validate: (input: string) => input.trim() ? true : 'Access Key ID cannot be empty',
+                    },
+                    {
+                        type: 'password',
+                        name: 'secretAccessKey',
+                        message: 'AWS Secret Access Key:',
+                        validate: (input: string) => input.trim() ? true : 'Secret Access Key cannot be empty',
+                        mask: '*',
+                    },
+                    {
+                        type: 'input',
+                        name: 'region',
+                        message: 'AWS Region:',
+                        default: 'us-east-1',
+                        validate: (input: string) => input.trim() ? true : 'Region cannot be empty',
+                    },
+                ]);
+
+                const currentConfig = await getEnvConfig(envName);
+                if (currentConfig) {
+                    await saveEnvConfig(envName, {
+                        ...currentConfig,
+                        region: awsConfig.region,
+                        awsAccessKeyId: awsConfig.accessKeyId,
+                        awsSecretAccessKey: awsConfig.secretAccessKey,
+                    });
+                }
+
+                logger.log('');
+                logger.success('✅ AWS credentials configured successfully!');
+                logger.log(`  Region: ${chalk.cyan(awsConfig.region)}`);
+                logger.log('');
+            }
+
             // logger.log(chalk.dim(`Config file: ${getConfigFilePath()}`)
             // );
         } catch (error) {
@@ -313,7 +426,6 @@ envCommand
             logger.log('');
             logger.success(`✅ Environment '${selectedEnv}' has been deleted`);
 
-            // Check if we deleted the active environment
             const newActiveEnv = await getActiveEnv();
             if (newActiveEnv && newActiveEnv !== selectedEnv) {
                 logger.log('');
@@ -370,6 +482,13 @@ program
                 await verifyCommonSchema();
                 logger.succeedSpinner('Common schema verified');
 
+                const envConfig = await getEnvConfig(envName);
+                const awsConfig = getAwsConfig(envConfig);
+                if (!awsConfig) {
+                    logger.log('');
+                    logger.info('AWS credentials not configured for this environment; DynamoDB table creation will be skipped.');
+                }
+
                 if (!options.yes) {
                     const answer = await inquirer.prompt([
                         {
@@ -412,12 +531,18 @@ program
                     } else {
                         logger.warnSpinner('Schema structure validation found issues');
                     }
+
+                    if (awsConfig) {
+                        await createDynamoTableForSchema(envName, result.schemaName, awsConfig);
+                    } else {
+                        logger.log('');
+                        logger.info('AWS credentials not configured for this environment; skipping DynamoDB table creation.');
+                    }
                 } else {
                     logger.error(`Schema creation failed: ${result.error}`);
                     process.exit(1);
                 }
             } else {
-                // Bulk creation mode
                 const envName = (await getActiveEnv()) || (await promptEnvSelection('Select environment for schema creation:'));
                 const templatePath = await getEnvTemplatePath(envName);
                 if (!templatePath) {
@@ -436,6 +561,13 @@ program
                 logger.startSpinner('Verifying common schema...');
                 await verifyCommonSchema();
                 logger.succeedSpinner('Common schema verified');
+
+                const envConfig = await getEnvConfig(envName);
+                const awsConfig = getAwsConfig(envConfig);
+                if (!awsConfig) {
+                    logger.log('');
+                    logger.info('AWS credentials not configured for this environment; DynamoDB table creation will be skipped.');
+                }
 
                 if (!options.yes) {
                     const answer = await inquirer.prompt([
@@ -473,6 +605,9 @@ program
                     if (result.success) {
                         results.successful.push(result.schemaName);
                         logger.success(`✓ ${chalk.cyan(result.schemaName)} created (ID: ${result.schemaId})`);
+                        if (awsConfig) {
+                            await createDynamoTableForSchema(envName, result.schemaName, awsConfig);
+                        }
                     } else {
                         results.failed.push({
                             name: result.schemaName,
@@ -1091,6 +1226,62 @@ program
         }
     });
 
+program
+    .command('dynamodb:list-tables')
+    .description('List DynamoDB tables')
+    .action(async () => {
+        try {
+            logger.header('📋 DynamoDB Tables');
+
+            const envName = await getActiveEnv();
+            if (!envName) {
+                logger.error('No active environment set. Use "phantm env:use <name>" first.');
+                process.exit(1);
+            }
+
+            const config = await getEnvConfig(envName);
+            if (!config) {
+                logger.error(`Environment '${envName}' not found`);
+                process.exit(1);
+            }
+
+            if (!config.region) {
+                logger.error('AWS region not configured. Please configure AWS credentials first.');
+                process.exit(1);
+            }
+
+            logger.log('');
+            logger.log(chalk.bold('Configuration:'));
+            logger.log(`  Environment: ${chalk.cyan(envName)}`);
+            logger.log(`  Region:      ${chalk.cyan(config.region)}`);
+            logger.log('');
+
+            logger.startSpinner('Fetching tables...');
+            const dynamoDB = new DynamoDBClient({
+                region: config.region,
+                credentials: {
+                    accessKeyId: config.awsAccessKeyId!,
+                    secretAccessKey: config.awsSecretAccessKey!,
+                },
+            });
+            const tables = await dynamoDB.send(new ListTablesCommand({}));
+            logger.succeedSpinner(`Found ${tables.TableNames?.length} table(s)`);
+
+            if (tables.TableNames && tables.TableNames.length > 0) {
+                logger.log('');
+                tables.TableNames.forEach((tableName, index) => {
+                    logger.log(`  ${index + 1}. ${chalk.cyan(tableName)}`);
+                });
+            } else {
+                logger.info('No tables found');
+            }
+        } catch (error) {
+            logger.failSpinner();
+            logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        }
+    });
+
 
 function getStatusColor(status: string): string {
     switch (status) {
@@ -1101,23 +1292,8 @@ function getStatusColor(status: string): string {
         case 'DELETED':
             return chalk.red('');
         default:
-            return chalk.gray('');
+            return chalk.reset('');
     }
 }
 
-process.on('unhandledRejection', (error) => {
-    logger.error(`Unhandled error: ${error instanceof Error ? error.message : String(error)}`);
-    closePool().finally(() => process.exit(1));
-});
-
-process.on('SIGINT', () => {
-    logger.log('');
-    logger.warn('Operation interrupted by user');
-    closePool().finally(() => process.exit(0));
-});
-
-program.parse(process.argv);
-
-if (!process.argv.slice(2).length) {
-    program.outputHelp();
-}
+program.parseAsync(process.argv);
