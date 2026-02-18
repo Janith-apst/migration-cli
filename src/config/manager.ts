@@ -13,6 +13,7 @@ export interface DatabaseConfig {
     createdAt?: string;
     updatedAt?: string;
     templatePath?: string;
+    seedPath?: string;
     region?: string;
     awsAccessKeyId?: string;
     awsSecretAccessKey?: string;
@@ -180,6 +181,38 @@ export async function clearEnvTemplatePath(envName: string): Promise<void> {
     await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
 }
 
+export async function setEnvSeedPath(envName: string, seedFolderPath: string): Promise<void> {
+    await ensureConfigDir();
+    const config = await readConfig();
+    const envConfig = await getEnvConfig(envName);
+    if (!envConfig) {
+        throw new Error(`Environment '${envName}' not found in config`);
+    }
+
+    config[envName] = {
+        ...(config[envName] as DatabaseConfig),
+        seedPath: path.resolve(seedFolderPath),
+    };
+
+    await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
+}
+
+export async function getEnvSeedPath(envName: string): Promise<string | null> {
+    const envConfig = await getEnvConfig(envName);
+    return envConfig?.seedPath || null;
+}
+
+export async function clearEnvSeedPath(envName: string): Promise<void> {
+    const config = await readConfig();
+    if (!config[envName]) {
+        throw new Error(`Environment '${envName}' not found in config`);
+    }
+    const envConfig = config[envName] as DatabaseConfig;
+    delete envConfig.seedPath;
+    config[envName] = envConfig;
+    await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
+}
+
 export async function configureAWSCredentials(
     accessKeyId: string,
     secretAccessKey: string,
@@ -199,7 +232,7 @@ export async function configureAWSCredentials(
         aws_access_key_id = ${accessKeyId}
         aws_secret_access_key = ${secretAccessKey}
         `;
-            const configContent = `[default]
+    const configContent = `[default]
         region = ${region}
         output = json
         `;

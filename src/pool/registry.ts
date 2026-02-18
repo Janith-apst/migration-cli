@@ -9,6 +9,12 @@ export interface SchemaPoolRecord {
     allocated_at?: Date | null;
     created_at?: Date;
     updated_at?: Date | null;
+    seeded_files?: SeededFileRecord[];
+}
+
+export interface SeededFileRecord {
+    file: string;
+    applied_at: string;
 }
 
 export async function registerSchema(
@@ -127,7 +133,8 @@ export async function getSchemaFromPool(schemaName: string): Promise<SchemaPoolR
       account_id,
       allocated_at,
       created_at,
-      updated_at
+      updated_at,
+      seeded_files
     FROM common.schema_pool
     WHERE schema_name = $1
   `;
@@ -140,4 +147,66 @@ export async function getSchemaFromPool(schemaName: string): Promise<SchemaPoolR
             `Failed to get schema from pool: ${error instanceof Error ? error.message : String(error)}`
         );
     }
+}
+
+export async function ensureSeededFilesColumn(): Promise<void> {
+    const pool = await getPool();
+    try {
+        await pool.query(`
+            ALTER TABLE common.schema_pool 
+            ADD COLUMN IF NOT EXISTS seeded_files JSONB DEFAULT '[]'::jsonb
+        `);
+    } catch (error) {
+        throw new Error(
+            `Failed to ensure seeded_files column: ${error instanceof Error ? error.message : String(error)}`
+        );
+    }
+}
+
+export async function getSeededFiles(schemaName: string): Promise<SeededFileRecord[]> {
+    const pool = await getPool();
+
+    const query = `
+        SELECT COALESCE(seeded_files, '[]'::jsonb) as seeded_files
+        FROM common.schema_pool
+        WHERE schema_name = $1
+    `;
+
+    try {
+        const result = await pool.query(query, [schemaName]);
+        if (result.rowCount && result.rowCount > 0) {
+            const files = result.rows[0].seeded_files;
+            return Array.isArray(files) ? files : [];
+        }
+        return [];
+    } catch (error) {
+        throw new Error(
+            `Failed to get seeded files for '${schemaName}': ${error instanceof Error ? error.message : String(error)}`
+        );
+    }
+}
+
+export async function updateSeededFiles(schemaName: string, seededFiles: SeededFileRecord[]): Promise<void> {
+    const pool = await getPool();
+
+    const query = `
+        UPDATE common.schema_pool 
+        SET seeded_files = $1::jsonb, updated_at = CURRENT_TIMESTAMP
+        WHERE schema_name = $2
+    `;
+
+    try {
+        const result = await pool.query(query, [JSON.stringify(seededFiles), schemaName]);
+        if (result.rowCount === 0) {
+            throw new Error(`Schema '${schemaName}' not found in schema_pool`);
+        }
+    } catch (error) {
+        throw new Error(
+            `Failed to update seeded files for '${schemaName}': ${error instanceof Error ? error.message : String(error)}`
+        );
+    }
+}
+
+export async function resetSeededFiles(schemaName: string): Promise<void> {
+    await updateSeededFiles(schemaName, []);
 }

@@ -204,6 +204,50 @@ export async function deleteSchemaComplete(schemaName: string): Promise<void> {
     }
 }
 
+export async function deleteSchemaAndMark(schemaName: string): Promise<void> {
+    const pool = await getPool();
+    const client = await pool.connect();
+
+    try {
+        const existsInDb = await schemaExistsInDatabase(schemaName);
+        const existsInPool = await schemaExistsInPool(schemaName);
+
+        if (!existsInDb && !existsInPool) {
+            throw new Error(`Schema '${schemaName}' does not exist in database or schema pool`);
+        }
+
+        await client.query('BEGIN');
+        try {
+            if (existsInDb) {
+                logger.startSpinner('Dropping schema from database...');
+                await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`);
+                logger.succeedSpinner('Schema dropped from database');
+            }
+
+            if (existsInPool) {
+                logger.startSpinner('Marking schema as DELETED in schema_pool...');
+                await client.query(
+                    "UPDATE common.schema_pool SET status = 'DELETED' WHERE schema_name = $1",
+                    [schemaName]
+                );
+                logger.succeedSpinner('Schema marked as DELETED in schema_pool');
+            }
+
+            await client.query('COMMIT');
+            logger.success(`Schema '${schemaName}' has been deleted and marked`);
+        } catch (error) {
+            await client.query('ROLLBACK');
+            throw error;
+        }
+    } catch (error) {
+        throw new Error(
+            `Failed to delete schema: ${error instanceof Error ? error.message : String(error)}`
+        );
+    } finally {
+        client.release();
+    }
+}
+
 export async function validateSchemaStructure(schemaName: string): Promise<boolean> {
     const pool = await getPool();
 

@@ -189,6 +189,80 @@ Combine options (single schema only):
 phantm create --name account_prod --force --yes
 ```
 
+### 3. Seeding Schemas (NEW)
+
+You can associate a folder of SQL seed files with each environment. Seed files are applied in order after schema creation, and you can re-run seeding at any time.
+
+#### Configure Seed Folder
+
+Set the seed folder when configuring your template:
+
+```bash
+phantm use <path-to-sql-file> --seed <seed-folder-path>
+```
+
+Example:
+```bash
+phantm use ./schemas/base-schema.sql --seed ./seeds
+```
+
+#### Seed File Naming
+
+Seed files must be named with a numeric prefix for ordering:
+
+```
+seeds/
+  1_roles.sql
+  2_default_users.sql
+  3_lookup_data.sql
+```
+
+You can use `{{SCHEMA_NAME}}` in your SQL to reference the target schema.
+
+#### Run Seeding
+
+Seed a single schema:
+```bash
+phantm seed <schema-name>
+```
+
+Seed all AVAILABLE schemas:
+```bash
+phantm seed --all-available
+```
+
+Seed all AVAILABLE and ALLOCATED schemas:
+```bash
+phantm seed --all
+```
+
+Skip confirmation prompt:
+```bash
+phantm seed <schema-name> -y
+```
+
+Show seed status/configuration:
+```bash
+phantm info seed [schema-name]
+```
+
+Reset seed tracking (for development):
+```bash
+phantm seed:reset <schema-name>
+```
+
+#### Auto-seed on Create (NEW)
+
+You can automatically run seeding after schema creation by adding the `--seed` flag:
+
+```bash
+phantm create --seed
+phantm create 5 --seed
+phantm create --name account_demo --seed
+```
+
+Each schema will be seeded immediately after creation. In bulk mode, seeding failures for one schema do not block the rest.
+
 ### 4. Schema Management
 
 #### List All Schemas
@@ -219,6 +293,29 @@ Example:
 ```bash
 phantm info account_abc12345
 ```
+
+#### Delete Schemas
+
+Delete a single schema (drops from DB, marks as DELETED in pool, deletes DynamoDB table):
+
+```bash
+phantm delete <schema-name>
+```
+
+Delete all AVAILABLE schemas at once:
+
+```bash
+phantm delete --all-available
+```
+
+Skip confirmation prompts:
+
+```bash
+phantm delete <schema-name> -y
+phantm delete --all-available -y
+```
+
+> **Note:** The delete command performs a soft-delete — schemas are marked as `DELETED` in the `schema_pool` table rather than being removed entirely. If AWS credentials are configured, the associated DynamoDB table is also deleted.
 
 ## Quick Start Example
 
