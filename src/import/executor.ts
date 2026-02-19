@@ -54,6 +54,7 @@ export interface DataValidationRules {
     numericEmptyAsNull?: boolean;
     trimValues?: boolean;
     autoSanitize?: boolean;
+    coerceIntegerDecimals?: boolean;
 }
 
 export interface SchemaCsvTableMatch {
@@ -167,6 +168,19 @@ function isNumericType(dataType: string, udtName: string): boolean {
         normalizedDataType === 'real' ||
         normalizedDataType === 'double precision' ||
         normalizedDataType === 'decimal'
+    );
+}
+
+function isIntegerType(dataType: string, udtName: string): boolean {
+    const normalizedDataType = dataType.toLowerCase();
+    const normalizedUdt = udtName.toLowerCase();
+    return (
+        normalizedUdt === 'int2' ||
+        normalizedUdt === 'int4' ||
+        normalizedUdt === 'int8' ||
+        normalizedDataType === 'smallint' ||
+        normalizedDataType === 'integer' ||
+        normalizedDataType === 'bigint'
     );
 }
 
@@ -636,6 +650,16 @@ export async function importCsvIntoTable(
 
                 if (validation.autoSanitize === true && normalizedValue !== null && columnMeta) {
                     normalizedValue = sanitizeValueByType(normalizedValue, columnMeta);
+                }
+
+                if (
+                    validation.coerceIntegerDecimals === true &&
+                    normalizedValue !== null &&
+                    columnMeta &&
+                    isIntegerType(columnMeta.dataType, columnMeta.udtName) &&
+                    /^-?\d+\.0+$/.test(normalizedValue)
+                ) {
+                    normalizedValue = normalizedValue.replace(/\.0+$/, '');
                 }
 
                 if (normalizedValue === '' && columnMeta) {

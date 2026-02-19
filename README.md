@@ -362,6 +362,12 @@ Enable coercion rules for common empty-value mismatches:
 phantm import ./data --order suppliers,products --empty-as-null --numeric-empty-as-null --json-empty-as-null --enum-empty-as-null --trim-values
 ```
 
+Coerce integer-like decimals for integer columns:
+
+```bash
+phantm import ./data --order suppliers,products,components --coerce-integer-decimals
+```
+
 Enable automatic sanitization for problematic control chars/JSON escapes:
 
 ```bash
@@ -378,7 +384,7 @@ During import, the CLI shows account-wise metadata + table preview (headers and 
 
 For the new advanced features, the CLI also shows what it is going to do and asks for approval before proceeding:
 - Resume scope confirmation (`--from-account`, `--only-account`, `--resume-failed-from-report`)
-- Validation/coercion rule confirmation (`--strict-columns`, `--validate-not-null`, `--strict-types`, `--null-string`, `--empty-as-null`, `--json-empty-as-null`, `--enum-empty-as-null`, `--numeric-empty-as-null`, `--trim-values`, `--auto-sanitize`)
+- Validation/coercion rule confirmation (`--strict-columns`, `--validate-not-null`, `--strict-types`, `--null-string`, `--empty-as-null`, `--json-empty-as-null`, `--enum-empty-as-null`, `--numeric-empty-as-null`, `--trim-values`, `--auto-sanitize`, `--coerce-integer-decimals`)
 - FK order confirmation (`--auto-order-from`)
 - DB cast precheck confirmation (`--precheck-db-casts`)
 
@@ -407,6 +413,7 @@ Table selection behavior:
 - `--numeric-empty-as-null` converts empty strings to NULL for numeric columns.
 - `--trim-values` trims surrounding whitespace before validation/import.
 - `--auto-sanitize` sanitizes problematic control characters and common JSON control unicode escapes (e.g. `\u0096`) before validation/import.
+- `--coerce-integer-decimals` converts integer-like decimals (e.g. `1.0`, `5.000`) into integers for integer columns.
 
 ### 5. Schema Management
 

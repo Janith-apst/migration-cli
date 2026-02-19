@@ -1635,6 +1635,7 @@ program
     .option('--numeric-empty-as-null', 'Convert empty CSV values ("") to NULL for numeric columns')
     .option('--trim-values', 'Trim whitespace around CSV values before validation/import')
     .option('--auto-sanitize', 'Sanitize problematic control characters and JSON unicode escapes before import')
+    .option('--coerce-integer-decimals', 'Convert integer-like decimal values (e.g. 1.0) to integer for integer columns')
     .option('-y, --yes', 'Skip account confirmation prompts')
     .action(async (importDataFolderPath, options) => {
         try {
@@ -1667,6 +1668,7 @@ program
                 numericEmptyAsNull: options.numericEmptyAsNull === true,
                 trimValues: options.trimValues === true,
                 autoSanitize: options.autoSanitize === true,
+                coerceIntegerDecimals: options.coerceIntegerDecimals === true,
             };
             const hasRuleOptions =
                 validationRules.strictColumns === true ||
@@ -1678,7 +1680,8 @@ program
                 validationRules.enumEmptyAsNull === true ||
                 validationRules.numericEmptyAsNull === true ||
                 validationRules.trimValues === true ||
-                validationRules.autoSanitize === true;
+                validationRules.autoSanitize === true ||
+                validationRules.coerceIntegerDecimals === true;
             const allowedModes: ImportMode[] = ['append', 'truncate', 'upsert'];
 
             if (!allowedModes.includes(rawMode as ImportMode)) {
@@ -1845,6 +1848,7 @@ program
                     validationRules.numericEmptyAsNull ? 'numeric-empty-as-null' : '',
                     validationRules.trimValues ? 'trim-values' : '',
                     validationRules.autoSanitize ? 'auto-sanitize' : '',
+                    validationRules.coerceIntegerDecimals ? 'coerce-integer-decimals' : '',
                 ].filter(Boolean).join(', '))}`);
             }
             logger.log('');
@@ -1897,6 +1901,7 @@ program
                 logger.log(`  numeric-empty-as-null:${chalk.cyan(validationRules.numericEmptyAsNull ? 'enabled' : 'disabled')}`);
                 logger.log(`  trim-values:      ${chalk.cyan(validationRules.trimValues ? 'enabled' : 'disabled')}`);
                 logger.log(`  auto-sanitize:    ${chalk.cyan(validationRules.autoSanitize ? 'enabled' : 'disabled')}`);
+                logger.log(`  coerce-integer-decimals:${chalk.cyan(validationRules.coerceIntegerDecimals ? 'enabled' : 'disabled')}`);
                 const rulesConfirm = await inquirer.prompt([
                     {
                         type: 'confirm',
