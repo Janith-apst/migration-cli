@@ -263,7 +263,152 @@ phantm create --name account_demo --seed
 
 Each schema will be seeded immediately after creation. In bulk mode, seeding failures for one schema do not block the rest.
 
-### 4. Schema Management
+### 4. CSV Data Import (NEW)
+
+Import CSV data into existing schemas using this folder structure:
+
+```text
+<import-root>/
+  account_xxxxxxxx/
+    table_a.csv
+    table_b.csv
+  account_yyyyyyyy/
+    table_a.csv
+    table_b.csv
+```
+
+- Folder name is treated as schema name.
+- CSV filename (without `.csv`) is treated as table name.
+- CSV header row is treated as the column list.
+
+Run import (provide either `--order` or `--auto-order-from`):
+
+```bash
+phantm import <import-data-folder-path> --order <table1,table2,...>
+```
+
+Example:
+
+```bash
+phantm import ./data --order suppliers,products,components,component_material
+```
+
+Auto-generate FK-safe table order from an existing schema:
+
+```bash
+phantm import ./data --auto-order-from account_fgwzgd0u
+```
+
+Choose import mode:
+
+```bash
+phantm import ./data --order suppliers,products,components --mode append
+phantm import ./data --order suppliers,products,components --mode truncate
+phantm import ./data --order suppliers,products,components --mode upsert
+```
+
+Run validation only (no writes):
+
+```bash
+phantm import ./data --order suppliers,products,components --dry-run
+```
+
+Run DB cast precheck (no writes, executes inserts then rolls back):
+
+```bash
+phantm import ./data --order suppliers,products,components --precheck-db-casts
+```
+
+Continue to next account when one account fails:
+
+```bash
+phantm import ./data --order suppliers,products,components,component_material --rollback-and-contiue
+```
+
+Filter accounts or resume from a specific account:
+
+```bash
+phantm import ./data --order suppliers,products --only-account account_fgwzgd0u
+phantm import ./data --order suppliers,products --from-account account_gntg0wt
+```
+
+Skip account-wise confirmations:
+
+```bash
+phantm import ./data --order suppliers,products --yes
+```
+
+Write a JSON report:
+
+```bash
+phantm import ./data --order suppliers,products --report ./artifacts/import-report.json
+```
+
+Resume only failed accounts from a previous report:
+
+```bash
+phantm import ./data --order suppliers,products --resume-failed-from-report ./artifacts/import-report.json
+```
+
+Enable strict validation rules:
+
+```bash
+phantm import ./data --order suppliers,products --strict-columns --validate-not-null --strict-types --null-string NULL
+```
+
+Enable coercion rules for common empty-value mismatches:
+
+```bash
+phantm import ./data --order suppliers,products --empty-as-null --numeric-empty-as-null --json-empty-as-null --enum-empty-as-null --trim-values
+```
+
+Enable automatic sanitization for problematic control chars/JSON escapes:
+
+```bash
+phantm import ./data --order suppliers,products --auto-sanitize
+```
+
+Set FK-safe table order:
+
+```bash
+phantm import ./data --order suppliers,products,components,component_material
+```
+
+During import, the CLI shows account-wise metadata + table preview (headers and first row), and asks for yes/y approval before importing each account (unless `--yes` is used).
+
+For the new advanced features, the CLI also shows what it is going to do and asks for approval before proceeding:
+- Resume scope confirmation (`--from-account`, `--only-account`, `--resume-failed-from-report`)
+- Validation/coercion rule confirmation (`--strict-columns`, `--validate-not-null`, `--strict-types`, `--null-string`, `--empty-as-null`, `--json-empty-as-null`, `--enum-empty-as-null`, `--numeric-empty-as-null`, `--trim-values`, `--auto-sanitize`)
+- FK order confirmation (`--auto-order-from`)
+- DB cast precheck confirmation (`--precheck-db-casts`)
+
+Each account import runs in a single transaction:
+- If any table fails for that account, all imported tables for that account are rolled back.
+- By default, import stops at the first failed account after rollback.
+- With `--rollback-and-contiue` (or `-r`), failed accounts are rolled back and skipped, and import continues with remaining accounts.
+
+Mode behavior:
+- `append`: inserts rows as-is.
+- `truncate`: truncates selected tables first (in reverse order), then inserts.
+- `upsert`: inserts or updates by primary key (requires PK columns in CSV).
+- `--precheck-db-casts`: attempts real DB inserts/casts in a transaction and always rolls back on success (useful to catch JSON/enum/numeric mismatch before real import).
+
+Table selection behavior:
+- With `--order`, only listed tables are imported. CSV files for tables not listed are ignored.
+- Missing CSV files for tables listed in `--order` are ignored for that account.
+- With `--auto-order-from`, all CSV tables in scope are ordered automatically and imported.
+- If a selected table does not exist in the target schema, that table import fails (and account rollback behavior applies).
+- `--strict-columns` fails when CSV columns and table insertable columns differ.
+- `--validate-not-null` fails when required NOT NULL columns are missing/empty.
+- `--strict-types` validates common PostgreSQL types before import.
+- `--empty-as-null` converts empty strings to NULL for all column types.
+- `--json-empty-as-null` converts empty strings to NULL for JSON/JSONB columns.
+- `--enum-empty-as-null` converts empty strings to NULL for enum columns.
+- `--numeric-empty-as-null` converts empty strings to NULL for numeric columns.
+- `--trim-values` trims surrounding whitespace before validation/import.
+- `--auto-sanitize` sanitizes problematic control characters and common JSON control unicode escapes (e.g. `\u0096`) before validation/import.
+
+### 5. Schema Management
 
 #### List All Schemas
 

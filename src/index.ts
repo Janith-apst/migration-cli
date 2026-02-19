@@ -4,9 +4,9 @@ import { Command } from 'commander';
 import inquirer from 'inquirer';
 import chalk from 'chalk';
 import { createRequire } from 'module';
-import { resolve } from 'path';
-import { access, constants, stat } from 'fs/promises';
-import { testConnection, verifyCommonSchema, closePool, getDatabaseConfig } from './db/connection.js';
+import { dirname, resolve } from 'path';
+import { access, constants, mkdir, readFile, stat, writeFile } from 'fs/promises';
+import { testConnection, verifyCommonSchema, closePool, getDatabaseConfig, getPool } from './db/connection.js';
 import { createSchema, validateSchemaStructure, deleteSchemaComplete, deleteSchemaAndMark } from './schema/creator.js';
 import { listSchemas, getSchemaFromPool, ensureSeededFilesColumn, getSeededFiles, resetSeededFiles } from './pool/registry.js';
 import { logger } from './utils/logger.js';
@@ -15,6 +15,16 @@ import { saveEnvConfig, getEnvConfig, listEnvs, getConfigFilePath, getActiveEnv,
 import type { DatabaseConfig } from './config/manager.js';
 import { seedSchema, seedMultipleSchemas, discoverSeedFiles, getPendingSeedFiles } from './seed/executor.js';
 import type { SeedResult } from './seed/executor.js';
+import {
+    type DataValidationRules,
+    discoverAccountImportPlans,
+    findUnknownOrderedTables,
+    importCsvIntoTable,
+    type ImportMode,
+    parseTableOrder,
+    suggestTableOrderByForeignKeys,
+    truncateTableForImport,
+} from './import/executor.js';
 import { DynamoDBClient, CreateTableCommand, ListTablesCommand, DeleteTableCommand } from '@aws-sdk/client-dynamodb';
 
 const require = createRequire(import.meta.url);
@@ -1602,6 +1612,641 @@ program
         }
     });
 
+program
+    .command('import <import-data-folder-path>')
+    .description('Import CSV files into schema tables from folder structure')
+    .option('--order <tables>', 'Comma-separated table names in import order')
+    .option('--auto-order-from <schema-name>', 'Auto-generate table order from FK relations in the given schema')
+    .option('--mode <mode>', 'Import mode: append | truncate | upsert', 'append')
+    .option('-r, --rollback-and-contiue', 'Rollback failed account and continue importing next accounts')
+    .option('--dry-run', 'Validate CSV and table mappings without writing data')
+    .option('--precheck-db-casts', 'Validate by executing DB casts/inserts inside transaction and rolling back')
+    .option('--report <file-path>', 'Write JSON import report to a file')
+    .option('--from-account <schema-name>', 'Start processing from this account folder (inclusive)')
+    .option('--only-account <schema-name>', 'Process only this account folder')
+    .option('--resume-failed-from-report <file-path>', 'Resume only failed accounts from a previous report')
+    .option('--strict-columns', 'Validate that CSV columns exactly match table insertable columns')
+    .option('--validate-not-null', 'Validate NOT NULL required columns are present and non-empty')
+    .option('--strict-types', 'Validate common PostgreSQL types before import')
+    .option('--null-string <value>', 'Treat this exact CSV value as NULL (e.g. NULL)')
+    .option('--empty-as-null', 'Convert empty CSV values ("") to NULL for all column types')
+    .option('--json-empty-as-null', 'Convert empty CSV values ("") to NULL for json/jsonb columns')
+    .option('--enum-empty-as-null', 'Convert empty CSV values ("") to NULL for enum columns')
+    .option('--numeric-empty-as-null', 'Convert empty CSV values ("") to NULL for numeric columns')
+    .option('--trim-values', 'Trim whitespace around CSV values before validation/import')
+    .option('--auto-sanitize', 'Sanitize problematic control characters and JSON unicode escapes before import')
+    .option('-y, --yes', 'Skip account confirmation prompts')
+    .action(async (importDataFolderPath, options) => {
+        try {
+            logger.header('📥 Data Import');
+
+            const envName = (await getActiveEnv()) || (await promptEnvSelection('Select environment for import:'));
+            const resolvedImportPath = resolve(importDataFolderPath);
+            const manualOrder = options.order ? parseTableOrder(String(options.order)) : null;
+            const autoOrderFrom = options.autoOrderFrom ? String(options.autoOrderFrom) : null;
+            const rawMode = String(options.mode ?? 'append').toLowerCase();
+            const rollbackAndContiue = options.rollbackAndContiue === true;
+            const dryRun = options.dryRun === true;
+            const precheckDbCasts = options.precheckDbCasts === true;
+            const validationOnlyMode = dryRun || precheckDbCasts;
+            const skipConfirmation = options.yes === true;
+            const reportPath = options.report ? resolve(options.report) : null;
+            const fromAccount = options.fromAccount ? String(options.fromAccount) : null;
+            const onlyAccount = options.onlyAccount ? String(options.onlyAccount) : null;
+            const resumeFailedFromReport = options.resumeFailedFromReport
+                ? resolve(String(options.resumeFailedFromReport))
+                : null;
+            const validationRules: DataValidationRules = {
+                strictColumns: options.strictColumns === true,
+                validateNotNull: options.validateNotNull === true,
+                strictTypes: options.strictTypes === true,
+                nullString: options.nullString !== undefined ? String(options.nullString) : undefined,
+                emptyAsNull: options.emptyAsNull === true,
+                jsonEmptyAsNull: options.jsonEmptyAsNull === true,
+                enumEmptyAsNull: options.enumEmptyAsNull === true,
+                numericEmptyAsNull: options.numericEmptyAsNull === true,
+                trimValues: options.trimValues === true,
+                autoSanitize: options.autoSanitize === true,
+            };
+            const hasRuleOptions =
+                validationRules.strictColumns === true ||
+                validationRules.validateNotNull === true ||
+                validationRules.strictTypes === true ||
+                validationRules.nullString !== undefined ||
+                validationRules.emptyAsNull === true ||
+                validationRules.jsonEmptyAsNull === true ||
+                validationRules.enumEmptyAsNull === true ||
+                validationRules.numericEmptyAsNull === true ||
+                validationRules.trimValues === true ||
+                validationRules.autoSanitize === true;
+            const allowedModes: ImportMode[] = ['append', 'truncate', 'upsert'];
+
+            if (!allowedModes.includes(rawMode as ImportMode)) {
+                throw new Error(`Invalid --mode '${rawMode}'. Allowed values: append, truncate, upsert`);
+            }
+            const importMode = rawMode as ImportMode;
+
+            if (fromAccount && onlyAccount) {
+                throw new Error('Use either --from-account or --only-account, not both');
+            }
+            if (dryRun && precheckDbCasts) {
+                throw new Error('Use either --dry-run or --precheck-db-casts, not both');
+            }
+
+            if (!manualOrder && !autoOrderFrom) {
+                throw new Error('Provide either --order <tables> or --auto-order-from <schema-name>');
+            }
+            if (manualOrder && autoOrderFrom) {
+                throw new Error('Use either --order or --auto-order-from, not both');
+            }
+            if (resumeFailedFromReport && (fromAccount || onlyAccount)) {
+                throw new Error('Use --resume-failed-from-report by itself, not with --from-account/--only-account');
+            }
+
+            let importPathStats;
+            try {
+                importPathStats = await stat(resolvedImportPath);
+            } catch (error) {
+                throw new Error(
+                    `Import folder '${resolvedImportPath}' does not exist: ${error instanceof Error ? error.message : String(error)}`
+                );
+            }
+
+            if (!importPathStats.isDirectory()) {
+                throw new Error(`Import path must be a directory: ${resolvedImportPath}`);
+            }
+
+            logger.startSpinner('Testing database connection...');
+            await testConnection();
+            logger.succeedSpinner('Database connection successful');
+
+            const discoveredPlans = await discoverAccountImportPlans(resolvedImportPath, []);
+            if (discoveredPlans.length === 0) {
+                logger.log('');
+                logger.warn('No account folders with CSV files were found.');
+                logger.log(`Expected structure: ${chalk.cyan('<import-root>/<schema-name>/<table>.csv')}`);
+                process.exit(1);
+            }
+
+            let plans = discoveredPlans;
+            if (onlyAccount) {
+                plans = plans.filter(plan => plan.schemaName === onlyAccount);
+                if (plans.length === 0) {
+                    throw new Error(`Account '${onlyAccount}' was not found in '${resolvedImportPath}'`);
+                }
+            } else if (fromAccount) {
+                const startIndex = plans.findIndex(plan => plan.schemaName === fromAccount);
+                if (startIndex < 0) {
+                    throw new Error(`Account '${fromAccount}' was not found in '${resolvedImportPath}'`);
+                }
+                plans = plans.slice(startIndex);
+            }
+
+            if (resumeFailedFromReport) {
+                let resumeData: any;
+                try {
+                    resumeData = JSON.parse(await readFile(resumeFailedFromReport, 'utf-8'));
+                } catch (error) {
+                    throw new Error(
+                        `Failed to read resume report '${resumeFailedFromReport}': ${error instanceof Error ? error.message : String(error)}`
+                    );
+                }
+                const failedAccounts: string[] = Array.isArray(resumeData?.accounts)
+                    ? resumeData.accounts
+                        .filter((account: any) => account?.status === 'failed' && typeof account?.schemaName === 'string')
+                        .map((account: any) => account.schemaName as string)
+                    : [];
+                if (failedAccounts.length === 0) {
+                    throw new Error(`No failed accounts found in report '${resumeFailedFromReport}'`);
+                }
+                const failedSet = new Set(failedAccounts);
+                plans = plans.filter(plan => failedSet.has(plan.schemaName));
+                if (plans.length === 0) {
+                    throw new Error('None of the failed report accounts exist in the current import folder');
+                }
+            }
+
+            let tableOrder: string[] = [];
+            if (manualOrder) {
+                const unknownOrderTables = findUnknownOrderedTables(manualOrder, plans);
+                if (unknownOrderTables.length > 0) {
+                    logger.log('');
+                    logger.warn(
+                        `These table(s) from --order are not found as CSV files in current scope and will be ignored: ${unknownOrderTables.join(', ')}`
+                    );
+                }
+                tableOrder = manualOrder;
+            } else if (autoOrderFrom) {
+                const availableTables = Array.from(
+                    new Set(plans.flatMap(plan => plan.tables.map(table => table.tableName)))
+                ).sort((a, b) => a.localeCompare(b));
+                const suggestion = await suggestTableOrderByForeignKeys(autoOrderFrom, availableTables);
+                tableOrder = suggestion.orderedTables;
+
+                logger.log('');
+                logger.log(chalk.bold('Auto FK Order Suggestion:'));
+                logger.log(`  Schema: ${chalk.cyan(autoOrderFrom)}`);
+                logger.log(`  Tables: ${chalk.cyan(availableTables.join(', '))}`);
+                logger.log(`  Suggested order: ${chalk.cyan(tableOrder.join(' -> '))}`);
+                if (suggestion.cyclicTables.length > 0) {
+                    logger.warn(
+                        `Detected FK cycles or unresolved dependencies for: ${suggestion.cyclicTables.join(', ')}`
+                    );
+                }
+
+                if (!skipConfirmation) {
+                    const autoOrderConfirm = await inquirer.prompt([
+                        {
+                            type: 'confirm',
+                            name: 'approve',
+                            message: `Apply this auto-generated FK order for import?`,
+                            default: false,
+                        },
+                    ]);
+                    if (!autoOrderConfirm.approve) {
+                        logger.info('Operation cancelled');
+                        process.exit(0);
+                    }
+                }
+            }
+
+            if (tableOrder.length === 0) {
+                throw new Error('Resolved table order is empty');
+            }
+
+            plans = plans.map(plan => ({
+                ...plan,
+                orderedTables: tableOrder
+                    .map(tableName => plan.tables.find(table => table.tableName === tableName))
+                    .filter(Boolean) as typeof plan.tables,
+            }));
+
+            logger.log(`  Environment: ${chalk.cyan(envName)}`);
+            logger.log(`  Import path: ${chalk.cyan(resolvedImportPath)}`);
+            logger.log(`  Order:       ${chalk.cyan(tableOrder.join(', '))}`);
+            logger.log(`  Mode:        ${chalk.cyan(importMode)}`);
+            logger.log(`  Dry run:     ${chalk.cyan(dryRun ? 'yes' : 'no')}`);
+            logger.log(`  Precheck:    ${chalk.cyan(precheckDbCasts ? 'db-cast check with rollback' : 'no')}`);
+            logger.log(`  Confirm:     ${chalk.cyan(skipConfirmation ? 'skipped (--yes)' : 'account-wise prompt')}`);
+            logger.log(`  On failure:  ${rollbackAndContiue ? chalk.cyan('rollback account and continue') : chalk.cyan('rollback account and stop')}`);
+            if (fromAccount) logger.log(`  From:        ${chalk.cyan(fromAccount)}`);
+            if (onlyAccount) logger.log(`  Only:        ${chalk.cyan(onlyAccount)}`);
+            if (resumeFailedFromReport) logger.log(`  Resume:      ${chalk.cyan(resumeFailedFromReport)}`);
+            if (reportPath) logger.log(`  Report:      ${chalk.cyan(reportPath)}`);
+            if (hasRuleOptions) {
+                logger.log(`  Rules:       ${chalk.cyan([
+                    validationRules.strictColumns ? 'strict-columns' : '',
+                    validationRules.validateNotNull ? 'validate-not-null' : '',
+                    validationRules.strictTypes ? 'strict-types' : '',
+                    validationRules.nullString !== undefined ? `null-string=${validationRules.nullString}` : '',
+                    validationRules.emptyAsNull ? 'empty-as-null' : '',
+                    validationRules.jsonEmptyAsNull ? 'json-empty-as-null' : '',
+                    validationRules.enumEmptyAsNull ? 'enum-empty-as-null' : '',
+                    validationRules.numericEmptyAsNull ? 'numeric-empty-as-null' : '',
+                    validationRules.trimValues ? 'trim-values' : '',
+                    validationRules.autoSanitize ? 'auto-sanitize' : '',
+                ].filter(Boolean).join(', '))}`);
+            }
+            logger.log('');
+
+            if (!skipConfirmation && (fromAccount || onlyAccount || resumeFailedFromReport)) {
+                logger.log(chalk.bold('Resume Scope:'));
+                logger.log(`  Accounts in scope: ${chalk.cyan(plans.length)}`);
+                logger.log(`  ${plans.map(plan => plan.schemaName).join(', ')}`);
+                const resumeConfirm = await inquirer.prompt([
+                    {
+                        type: 'confirm',
+                        name: 'approve',
+                        message: `Proceed with this account scope?`,
+                        default: false,
+                    },
+                ]);
+                if (!resumeConfirm.approve) {
+                    logger.info('Operation cancelled');
+                    process.exit(0);
+                }
+            }
+
+            if (!skipConfirmation && precheckDbCasts) {
+                logger.log(chalk.bold('Precheck Plan:'));
+                logger.log('  The tool will attempt inserts against database types and constraints,');
+                logger.log('  then rollback each account transaction (no persisted writes).');
+                const precheckConfirm = await inquirer.prompt([
+                    {
+                        type: 'confirm',
+                        name: 'approve',
+                        message: `Proceed with DB cast precheck mode?`,
+                        default: false,
+                    },
+                ]);
+                if (!precheckConfirm.approve) {
+                    logger.info('Operation cancelled');
+                    process.exit(0);
+                }
+            }
+
+            if (!skipConfirmation && hasRuleOptions) {
+                logger.log(chalk.bold('Validation/Coercion Rules:'));
+                logger.log(`  strict-columns:   ${chalk.cyan(validationRules.strictColumns ? 'enabled' : 'disabled')}`);
+                logger.log(`  validate-not-null:${chalk.cyan(validationRules.validateNotNull ? 'enabled' : 'disabled')}`);
+                logger.log(`  strict-types:     ${chalk.cyan(validationRules.strictTypes ? 'enabled' : 'disabled')}`);
+                logger.log(`  null-string:      ${chalk.cyan(validationRules.nullString ?? '(none)')}`);
+                logger.log(`  empty-as-null:    ${chalk.cyan(validationRules.emptyAsNull ? 'enabled' : 'disabled')}`);
+                logger.log(`  json-empty-as-null:${chalk.cyan(validationRules.jsonEmptyAsNull ? 'enabled' : 'disabled')}`);
+                logger.log(`  enum-empty-as-null:${chalk.cyan(validationRules.enumEmptyAsNull ? 'enabled' : 'disabled')}`);
+                logger.log(`  numeric-empty-as-null:${chalk.cyan(validationRules.numericEmptyAsNull ? 'enabled' : 'disabled')}`);
+                logger.log(`  trim-values:      ${chalk.cyan(validationRules.trimValues ? 'enabled' : 'disabled')}`);
+                logger.log(`  auto-sanitize:    ${chalk.cyan(validationRules.autoSanitize ? 'enabled' : 'disabled')}`);
+                const rulesConfirm = await inquirer.prompt([
+                    {
+                        type: 'confirm',
+                        name: 'approve',
+                        message: `Proceed with these validation/coercion rules?`,
+                        default: false,
+                    },
+                ]);
+                if (!rulesConfirm.approve) {
+                    logger.info('Operation cancelled');
+                    process.exit(0);
+                }
+            }
+
+            const totalTables = plans.reduce((sum, plan) => sum + plan.tables.length, 0);
+            logger.info(`Found ${plans.length} account folder(s) and ${totalTables} CSV file(s) in scope.`);
+
+            let importedAccounts = 0;
+            let validatedAccounts = 0;
+            let skippedAccounts = 0;
+            let failedAccounts = 0;
+            let totalRowsProcessed = 0;
+            let stoppedAfterFailure = false;
+            const runStartedAt = new Date();
+
+            const report: {
+                generatedAt: string;
+                startedAt: string;
+                finishedAt: string;
+                options: {
+                    environment: string;
+                    importPath: string;
+                    order: string[];
+                    orderSource: 'manual' | 'auto-fk';
+                    autoOrderFrom: string | null;
+                    mode: ImportMode;
+                    dryRun: boolean;
+                    precheckDbCasts: boolean;
+                    rollbackAndContiue: boolean;
+                    skipConfirmation: boolean;
+                    fromAccount: string | null;
+                    onlyAccount: string | null;
+                    resumeFailedFromReport: string | null;
+                    validation: DataValidationRules;
+                };
+                summary: {
+                    accountsPlanned: number;
+                    accountsImported: number;
+                    accountsValidated: number;
+                    accountsSkipped: number;
+                    accountsFailed: number;
+                    rowsProcessed: number;
+                    stoppedEarly: boolean;
+                };
+                accounts: Array<{
+                    schemaName: string;
+                    status: 'imported' | 'validated' | 'skipped' | 'failed';
+                    reason?: string;
+                    rows: number;
+                    startedAt: string;
+                    finishedAt: string;
+                    tables: Array<{
+                        tableName: string;
+                        fileName: string;
+                        status: 'planned' | 'validated' | 'imported' | 'failed' | 'skipped';
+                        rows: number;
+                        error?: string;
+                        durationMs: number;
+                    }>;
+                }>;
+            } = {
+                generatedAt: new Date().toISOString(),
+                startedAt: runStartedAt.toISOString(),
+                finishedAt: '',
+                options: {
+                    environment: envName,
+                    importPath: resolvedImportPath,
+                    order: tableOrder,
+                    orderSource: manualOrder ? 'manual' : 'auto-fk',
+                    autoOrderFrom,
+                    mode: importMode,
+                    dryRun,
+                    precheckDbCasts,
+                    rollbackAndContiue,
+                    skipConfirmation,
+                    fromAccount,
+                    onlyAccount,
+                    resumeFailedFromReport,
+                    validation: validationRules,
+                },
+                summary: {
+                    accountsPlanned: plans.length,
+                    accountsImported: 0,
+                    accountsValidated: 0,
+                    accountsSkipped: 0,
+                    accountsFailed: 0,
+                    rowsProcessed: 0,
+                    stoppedEarly: false,
+                },
+                accounts: [],
+            };
+
+            for (const plan of plans) {
+                logger.log('');
+                logger.divider();
+                logger.log(chalk.bold(`Account: ${plan.schemaName}`));
+                logger.log(`  Folder: ${chalk.cyan(plan.folderPath)}`);
+                logger.log(`  CSV tables: ${chalk.cyan(plan.tables.length)}`);
+                logger.log(`  Selected:   ${chalk.cyan(plan.orderedTables.length)}`);
+                logger.log(`  Order:  ${chalk.cyan(plan.orderedTables.map(table => table.tableName).join(' -> '))}`);
+                logger.log('');
+
+                const accountStartedAt = new Date();
+                const accountReport = {
+                    schemaName: plan.schemaName,
+                    status: 'skipped' as 'imported' | 'validated' | 'skipped' | 'failed',
+                    reason: '',
+                    rows: 0,
+                    startedAt: accountStartedAt.toISOString(),
+                    finishedAt: accountStartedAt.toISOString(),
+                    tables: plan.orderedTables.map(table => ({
+                        tableName: table.tableName,
+                        fileName: table.fileName,
+                        status: 'planned' as 'planned' | 'validated' | 'imported' | 'failed' | 'skipped',
+                        rows: 0,
+                        error: '',
+                        durationMs: 0,
+                    })),
+                };
+                report.accounts.push(accountReport);
+
+                const missingOrderedCsv = tableOrder.filter(
+                    orderedTable => !plan.tables.some(table => table.tableName === orderedTable)
+                );
+                if (missingOrderedCsv.length > 0) {
+                    logger.warn(
+                        `Ignoring missing ordered table CSV(s) for '${plan.schemaName}': ${missingOrderedCsv.join(', ')}`
+                    );
+                }
+
+                if (plan.orderedTables.length === 0) {
+                    logger.warn(`No tables selected for import in '${plan.schemaName}'.`);
+                    accountReport.status = 'skipped';
+                    accountReport.reason = 'No matching tables found between order and CSV files';
+                    accountReport.finishedAt = new Date().toISOString();
+                    skippedAccounts++;
+                    continue;
+                }
+
+                logger.log(chalk.bold('Table preview:'));
+
+                for (const [index, table] of plan.orderedTables.entries()) {
+                    logger.log(`  ${index + 1}. ${chalk.cyan(table.tableName)} (${table.fileName})`);
+                    logger.log(`     Size: ${formatBytes(table.sizeBytes)} | Columns: ${table.preview.headers.length}`);
+                    logger.log(`     Header: ${chalk.gray(table.preview.headers.join(', '))}`);
+                    logger.log(`     Peek:   ${chalk.gray(formatPreviewRow(table.preview.headers, table.preview.firstRow))}`);
+                }
+
+                if (!skipConfirmation) {
+                    logger.log('');
+                    const confirmation = await inquirer.prompt([
+                        {
+                            type: 'confirm',
+                            name: 'proceed',
+                            message: dryRun
+                                ? `Validate account/schema '${plan.schemaName}'?`
+                                : precheckDbCasts
+                                    ? `Precheck DB casts for account/schema '${plan.schemaName}'?`
+                                    : `Import data for account/schema '${plan.schemaName}'?`,
+                            default: false,
+                        },
+                    ]);
+
+                    if (!confirmation.proceed) {
+                        skippedAccounts++;
+                        accountReport.status = 'skipped';
+                        accountReport.reason = 'User skipped account';
+                        accountReport.tables = accountReport.tables.map(table => ({
+                            ...table,
+                            status: 'skipped',
+                        }));
+                        accountReport.finishedAt = new Date().toISOString();
+                        logger.warn(`Skipped '${plan.schemaName}'`);
+                        continue;
+                    }
+                }
+
+                const pool = await getPool();
+                const client = await pool.connect();
+                let accountRows = 0;
+                let failedTableName: string | null = null;
+                let accountFailed = false;
+
+                try {
+                    if (!dryRun) {
+                        await client.query('BEGIN');
+                    }
+
+                    if (!dryRun && importMode === 'truncate') {
+                        for (const table of [...plan.orderedTables].reverse()) {
+                            logger.startSpinner(`Truncating ${plan.schemaName}.${table.tableName}...`);
+                            try {
+                                await truncateTableForImport(plan.schemaName, table.tableName, client);
+                                logger.succeedSpinner(`Truncated ${plan.schemaName}.${table.tableName}`);
+                            } catch (error) {
+                                failedTableName = table.tableName;
+                                logger.failSpinner(`Failed truncating ${plan.schemaName}.${table.tableName}`);
+                                throw error;
+                            }
+                        }
+                    }
+
+                    for (const table of plan.orderedTables) {
+                        const tableReport = accountReport.tables.find(t => t.tableName === table.tableName);
+                        const tableStartedAt = Date.now();
+                        logger.startSpinner(`Importing ${plan.schemaName}.${table.tableName}...`);
+                        try {
+                            const tableMode: ImportMode = importMode === 'upsert' ? 'upsert' : 'append';
+                            const result = await importCsvIntoTable(
+                                plan.schemaName,
+                                table.tableName,
+                                table.filePath,
+                                {
+                                    client,
+                                    mode: tableMode,
+                                    dryRun,
+                                    validation: validationRules,
+                                    diagnoseRowErrors: true,
+                                }
+                            );
+                            accountRows += result.rowsInserted;
+                            if (tableReport) {
+                                tableReport.rows = result.rowsInserted;
+                                tableReport.durationMs = Date.now() - tableStartedAt;
+                                tableReport.status = validationOnlyMode ? 'validated' : 'imported';
+                            }
+                            if (validationOnlyMode) {
+                                logger.succeedSpinner(
+                                    `${precheckDbCasts ? 'Prechecked' : 'Validated'} ${result.rowsInserted} row(s) for ${plan.schemaName}.${table.tableName}`
+                                );
+                            } else {
+                                logger.succeedSpinner(
+                                    `Imported ${result.rowsInserted} row(s) into ${plan.schemaName}.${table.tableName}`
+                                );
+                            }
+                        } catch (error) {
+                            failedTableName = table.tableName;
+                            logger.failSpinner(`Failed importing ${plan.schemaName}.${table.tableName}`);
+                            if (tableReport) {
+                                tableReport.durationMs = Date.now() - tableStartedAt;
+                                tableReport.status = 'failed';
+                                tableReport.error = error instanceof Error ? error.message : String(error);
+                            }
+                            throw error;
+                        }
+                    }
+
+                    if (precheckDbCasts) {
+                        await client.query('ROLLBACK');
+                        validatedAccounts++;
+                        logger.success(`Precheck passed for '${plan.schemaName}' (${accountRows} row(s) checked, rolled back)`);
+                        accountReport.status = 'validated';
+                    } else if (!dryRun) {
+                        await client.query('COMMIT');
+                        importedAccounts++;
+                        logger.success(`Completed '${plan.schemaName}' (${accountRows} row(s) inserted)`);
+                        accountReport.status = 'imported';
+                    } else {
+                        validatedAccounts++;
+                        logger.success(`Validated '${plan.schemaName}' (${accountRows} row(s) checked)`);
+                        accountReport.status = 'validated';
+                    }
+                    accountReport.rows = accountRows;
+                    totalRowsProcessed += accountRows;
+                } catch (error) {
+                    accountFailed = true;
+                    if (!dryRun) {
+                        await client.query('ROLLBACK');
+                        logger.warn(
+                            precheckDbCasts
+                                ? `Rolled back precheck transaction for '${plan.schemaName}'.`
+                                : `Rolled back all imported data for '${plan.schemaName}'.`
+                        );
+                    }
+                    if (failedTableName) {
+                        logger.error(
+                            `Import failed at table '${failedTableName}': ${error instanceof Error ? error.message : String(error)}`
+                        );
+                    } else {
+                        logger.error(error instanceof Error ? error.message : String(error));
+                    }
+                    accountReport.status = 'failed';
+                    accountReport.reason = failedTableName
+                        ? `Failed at table '${failedTableName}'`
+                        : 'Import failed';
+                    failedAccounts++;
+                    if (!rollbackAndContiue) {
+                        stoppedAfterFailure = true;
+                    }
+                } finally {
+                    accountReport.finishedAt = new Date().toISOString();
+                    client.release();
+                }
+
+                if (accountFailed && stoppedAfterFailure) {
+                    logger.warn('Stopping import due to account failure. Use --rollback-and-contiue to continue with next accounts.');
+                    break;
+                }
+            }
+
+            report.finishedAt = new Date().toISOString();
+            report.summary.accountsImported = importedAccounts;
+            report.summary.accountsValidated = validatedAccounts;
+            report.summary.accountsSkipped = skippedAccounts;
+            report.summary.accountsFailed = failedAccounts;
+            report.summary.rowsProcessed = totalRowsProcessed;
+            report.summary.stoppedEarly = stoppedAfterFailure;
+
+            if (reportPath) {
+                await mkdir(dirname(reportPath), { recursive: true });
+                await writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
+            }
+
+            logger.log('');
+            logger.divider();
+            logger.header('📊 Import Summary');
+            logger.log(`  Accounts imported:  ${chalk.cyan(importedAccounts)}`);
+            logger.log(`  Accounts validated: ${chalk.cyan(validatedAccounts)}`);
+            logger.log(`  Accounts skipped:  ${chalk.cyan(skippedAccounts)}`);
+            logger.log(`  Accounts failed:   ${chalk.cyan(failedAccounts)}`);
+            logger.log(`  Total rows:        ${chalk.cyan(totalRowsProcessed)}`);
+            if (stoppedAfterFailure) {
+                logger.log(`  Stopped early:     ${chalk.cyan('yes')}`);
+            }
+            if (reportPath) {
+                logger.log(`  Report file:       ${chalk.cyan(reportPath)}`);
+            }
+
+            if (failedAccounts > 0) {
+                process.exit(1);
+            }
+        } catch (error) {
+            logger.failSpinner();
+            logger.error(`Import failed: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        } finally {
+            await closePool();
+        }
+    });
+
 
 function getStatusColor(status: string): string {
     switch (status) {
@@ -1614,6 +2259,26 @@ function getStatusColor(status: string): string {
         default:
             return chalk.reset('');
     }
+}
+
+function formatBytes(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatPreviewRow(headers: string[], firstRow: string[] | null): string {
+    if (!firstRow) {
+        return chalk.gray('(no data rows)');
+    }
+
+    return headers
+        .map((header, index) => {
+            const value = firstRow[index] ?? '';
+            const clipped = value.length > 30 ? `${value.slice(0, 30)}...` : value;
+            return `${header}=${clipped}`;
+        })
+        .join(' | ');
 }
 
 function printSeedResult(result: SeedResult): void {
