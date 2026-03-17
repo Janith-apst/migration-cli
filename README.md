@@ -469,6 +469,70 @@ phantm delete --all-available -y
 
 > **Note:** The delete command performs a soft-delete — schemas are marked as `DELETED` in the `schema_pool` table rather than being removed entirely. If AWS credentials are configured, the associated DynamoDB table is also deleted.
 
+### 6. Iterative Full Cleanup (NEW)
+
+`cleanup` is an iterative, per-schema destructive flow designed for full account cleanup.
+
+For each `account_*` schema found in the database, it will:
+- Load related records from `common.schema_pool`, `common.accounts`, and `common.users`
+- Show key details (including names/emails and timestamps formatted in `+05:30` timezone)
+- Discover matching DynamoDB tables by account code (`prep-data` and `event_data` patterns)
+- Resolve Cognito users by `sub` (mapped from `common.users.subject_id`)
+- Ask for confirmation before cleanup of that schema
+
+If confirmed, it will:
+- Drop the schema
+- Delete related rows from `common.users`, `common.accounts`, and `common.schema_pool`
+- Delete discovered DynamoDB tables
+- Delete discovered Cognito users
+
+If declined, it skips that schema and continues to the next one.
+
+Run interactive iterative cleanup:
+
+```bash
+phantm cleanup
+```
+
+Cleanup all discovered schemas without per-schema prompt:
+
+```bash
+phantm cleanup --yes
+```
+
+Start iteration from a specific schema (inclusive):
+
+```bash
+phantm cleanup --from account_fgwzgd0u
+```
+
+Process only one schema:
+
+```bash
+phantm cleanup --only account_fgwzgd0u
+```
+
+Skip specific schemas during cleanup:
+
+```bash
+phantm cleanup --except account_keep1 account_keep2
+phantm cleanup --except account_keep1,account_keep2
+```
+
+Dry-run full discovery (no deletes), auto-iterate all schemas, and write CSV report:
+
+```bash
+phantm cleanup --dry-run
+```
+
+Dry-run with custom CSV output path:
+
+```bash
+phantm cleanup --dry-run --csv ./artifacts/cleanup-report.csv
+```
+
+> **Cognito requirement:** set `cognitoUserPoolId` in environment config (or `AWS_COGNITO_USER_POOL_ID`) to enable Cognito discovery/deletion. You can also store `cognitoAppClientId` during `phantm configure` for future Cognito workflows.
+
 ## Quick Start Example
 
 ```bash

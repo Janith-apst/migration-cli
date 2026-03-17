@@ -26,6 +26,11 @@ import {
     truncateTableForImport,
 } from './import/executor.js';
 import { DynamoDBClient, CreateTableCommand, ListTablesCommand, DeleteTableCommand } from '@aws-sdk/client-dynamodb';
+import {
+    CognitoIdentityProviderClient,
+    ListUsersCommand,
+    AdminDeleteUserCommand,
+} from '@aws-sdk/client-cognito-identity-provider';
 
 const require = createRequire(import.meta.url);
 const { version } = require('../package.json');
@@ -105,6 +110,57 @@ async function createDynamoTableForSchema(envName: string, schemaName: string, c
     }
 }
 
+async function createEventDataDynamoTableForSchema(envName: string, schemaName: string, config: AwsReadyConfig): Promise<void> {
+    const accountCode = schemaName.replace('account_', '').replace(/_/g, '');
+    const tableName = `${envName}-event_data_${accountCode}`;
+
+    logger.log('');
+    logger.log(chalk.bold('DynamoDB Event Data Table:'));
+    logger.log(`  Table Name: ${chalk.cyan(tableName)}`);
+    logger.log(`  Region:     ${chalk.cyan(config.region)}`);
+    logger.log('');
+
+    try {
+        logger.startSpinner('Creating DynamoDB event_data table...');
+        const dynamoDB = new DynamoDBClient({
+            region: config.region,
+            credentials: {
+                accessKeyId: config.awsAccessKeyId,
+                secretAccessKey: config.awsSecretAccessKey,
+            },
+        });
+
+        await dynamoDB.send(new CreateTableCommand({
+            TableName: tableName,
+            KeySchema: [
+                { AttributeName: 'source_id', KeyType: 'HASH' },
+                { AttributeName: 'entity', KeyType: 'RANGE' },
+            ],
+            AttributeDefinitions: [
+                { AttributeName: 'source_id', AttributeType: 'S' },
+                { AttributeName: 'entity', AttributeType: 'S' },
+            ],
+            ProvisionedThroughput: {
+                ReadCapacityUnits: 5,
+                WriteCapacityUnits: 5,
+            },
+        }));
+
+        logger.succeedSpinner('DynamoDB event_data table created successfully');
+        logger.log('');
+        logger.success(`✅ DynamoDB table '${chalk.cyan(tableName)}' created!`);
+    } catch (dynamoError) {
+        logger.failSpinner();
+        logger.error(`DynamoDB table creation failed for '${tableName}': ${dynamoError instanceof Error ? dynamoError.message : String(dynamoError)}`);
+        logger.warn('Schema was created successfully, but event_data DynamoDB table creation failed.');
+    }
+}
+
+async function createDynamoTablesForSchema(envName: string, schemaName: string, config: AwsReadyConfig): Promise<void> {
+    await createDynamoTableForSchema(envName, schemaName, config);
+    await createEventDataDynamoTableForSchema(envName, schemaName, config);
+}
+
 async function deleteDynamoTableForSchema(envName: string, schemaName: string, config: AwsReadyConfig): Promise<void> {
     const accountCode = schemaName.replace('account_', '').replace(/_/g, '');
     const tableName = `${envName}-prep-data-${accountCode}`;
@@ -128,6 +184,569 @@ async function deleteDynamoTableForSchema(envName: string, schemaName: string, c
             logger.failSpinner();
             logger.warn(`Failed to delete DynamoDB table '${tableName}': ${dynamoError instanceof Error ? dynamoError.message : String(dynamoError)}`);
         }
+    }
+}
+
+async function deleteEventDataDynamoTableForSchema(envName: string, schemaName: string, config: AwsReadyConfig): Promise<void> {
+    const accountCode = schemaName.replace('account_', '').replace(/_/g, '');
+    const tableName = `${envName}-event_data_${accountCode}`;
+
+    try {
+        logger.startSpinner(`Deleting DynamoDB table '${tableName}'...`);
+        const dynamoDB = new DynamoDBClient({
+            region: config.region,
+            credentials: {
+                accessKeyId: config.awsAccessKeyId,
+                secretAccessKey: config.awsSecretAccessKey,
+            },
+        });
+
+        await dynamoDB.send(new DeleteTableCommand({ TableName: tableName }));
+        logger.succeedSpinner(`DynamoDB table '${tableName}' deleted`);
+    } catch (dynamoError: any) {
+        if (dynamoError?.name === 'ResourceNotFoundException') {
+            logger.succeedSpinner(`DynamoDB table '${tableName}' does not exist (skipped)`);
+        } else {
+            logger.failSpinner();
+            logger.warn(`Failed to delete DynamoDB table '${tableName}': ${dynamoError instanceof Error ? dynamoError.message : String(dynamoError)}`);
+        }
+    }
+}
+
+async function deleteDynamoTablesForSchema(envName: string, schemaName: string, config: AwsReadyConfig): Promise<void> {
+    await deleteDynamoTableForSchema(envName, schemaName, config);
+    await deleteEventDataDynamoTableForSchema(envName, schemaName, config);
+}
+
+type JsonRecord = Record<string, unknown>;
+
+type CognitoUserMatch = {
+    sub: string;
+    username: string;
+    email?: string;
+    status?: string;
+};
+
+type CleanupContext = {
+    schemaName: string;
+    accountCode: string;
+    schemaPoolRow: JsonRecord | null;
+    accountRow: JsonRecord | null;
+    userRows: JsonRecord[];
+    accountIdCandidates: string[];
+    subjectIds: string[];
+    dynamoTables: string[];
+    cognitoUsers: CognitoUserMatch[];
+    usersColumns: Set<string>;
+    accountsColumns: Set<string>;
+};
+
+function getAccountCodeFromSchema(schemaName: string): string {
+    return schemaName.replace(/^account_/, '').replace(/_/g, '');
+}
+
+function toColomboTime(value: unknown): string {
+    if (!value) {
+        return 'N/A';
+    }
+    const date = value instanceof Date ? value : new Date(String(value));
+    if (Number.isNaN(date.getTime())) {
+        return String(value);
+    }
+    return `${date.toLocaleString('en-GB', {
+        timeZone: 'Asia/Colombo',
+        hour12: false,
+    })} (+05:30)`;
+}
+
+function asString(value: unknown): string | null {
+    if (value === null || value === undefined) {
+        return null;
+    }
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        return trimmed.length > 0 ? trimmed : null;
+    }
+    if (typeof value === 'number' || typeof value === 'bigint' || typeof value === 'boolean') {
+        return String(value);
+    }
+    return null;
+}
+
+function dedupeStrings(values: Array<string | null | undefined>): string[] {
+    const result = new Set<string>();
+    for (const value of values) {
+        if (value && value.trim()) {
+            result.add(value.trim());
+        }
+    }
+    return Array.from(result);
+}
+
+function getRowString(row: JsonRecord | null, keys: string[]): string | null {
+    if (!row) {
+        return null;
+    }
+    for (const key of keys) {
+        const value = asString(row[key]);
+        if (value) {
+            return value;
+        }
+    }
+    return null;
+}
+
+async function tableExists(schemaName: string, tableName: string): Promise<boolean> {
+    const pool = await getPool();
+    const result = await pool.query(
+        `
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = $1 AND table_name = $2
+        LIMIT 1
+        `,
+        [schemaName, tableName]
+    );
+    return (result.rowCount ?? 0) > 0;
+}
+
+async function getTableColumns(schemaName: string, tableName: string): Promise<Set<string>> {
+    const pool = await getPool();
+    const result = await pool.query(
+        `
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = $1 AND table_name = $2
+        `,
+        [schemaName, tableName]
+    );
+    return new Set<string>(result.rows.map((row) => String(row.column_name)));
+}
+
+function buildWhereClause(clauses: string[]): string {
+    if (clauses.length === 0) {
+        return '1 = 0';
+    }
+    return clauses.join(' OR ');
+}
+
+async function listAccountSchemasFromDb(): Promise<string[]> {
+    const pool = await getPool();
+    const result = await pool.query(`
+        SELECT schema_name
+        FROM information_schema.schemata
+        WHERE schema_name LIKE 'account\\_%' ESCAPE '\\'
+        ORDER BY schema_name ASC
+    `);
+    return result.rows.map((row) => String(row.schema_name));
+}
+
+async function listDynamoTablesForAccountCode(accountCode: string, config: AwsReadyConfig): Promise<string[]> {
+    const client = new DynamoDBClient({
+        region: config.region,
+        credentials: {
+            accessKeyId: config.awsAccessKeyId,
+            secretAccessKey: config.awsSecretAccessKey,
+        },
+    });
+
+    let lastEvaluatedTableName: string | undefined;
+    const allTables: string[] = [];
+
+    do {
+        const response = await client.send(new ListTablesCommand({ ExclusiveStartTableName: lastEvaluatedTableName }));
+        if (response.TableNames) {
+            allTables.push(...response.TableNames);
+        }
+        lastEvaluatedTableName = response.LastEvaluatedTableName;
+    } while (lastEvaluatedTableName);
+
+    const normalizedCode = accountCode.toLowerCase();
+    return allTables.filter((name) => {
+        const lowered = name.toLowerCase();
+        return lowered.includes(normalizedCode) && (lowered.includes('prep-data') || lowered.includes('event_data'));
+    });
+}
+
+async function deleteDynamoTablesByName(tableNames: string[], config: AwsReadyConfig): Promise<void> {
+    if (tableNames.length === 0) {
+        return;
+    }
+
+    const client = new DynamoDBClient({
+        region: config.region,
+        credentials: {
+            accessKeyId: config.awsAccessKeyId,
+            secretAccessKey: config.awsSecretAccessKey,
+        },
+    });
+
+    for (const tableName of tableNames) {
+        try {
+            logger.startSpinner(`Deleting DynamoDB table '${tableName}'...`);
+            await client.send(new DeleteTableCommand({ TableName: tableName }));
+            logger.succeedSpinner(`DynamoDB table '${tableName}' deleted`);
+        } catch (error: any) {
+            if (error?.name === 'ResourceNotFoundException') {
+                logger.succeedSpinner(`DynamoDB table '${tableName}' does not exist (skipped)`);
+            } else {
+                logger.failSpinner();
+                logger.warn(`Failed to delete DynamoDB table '${tableName}': ${error instanceof Error ? error.message : String(error)}`);
+            }
+        }
+    }
+}
+
+async function getCognitoUsersBySub(
+    subjectIds: string[],
+    config: AwsReadyConfig,
+    userPoolId: string
+): Promise<CognitoUserMatch[]> {
+    if (subjectIds.length === 0) {
+        return [];
+    }
+
+    const client = new CognitoIdentityProviderClient({
+        region: config.region,
+        credentials: {
+            accessKeyId: config.awsAccessKeyId,
+            secretAccessKey: config.awsSecretAccessKey,
+        },
+    });
+
+    const matches: CognitoUserMatch[] = [];
+    for (const sub of subjectIds) {
+        const response = await client.send(new ListUsersCommand({
+            UserPoolId: userPoolId,
+            Filter: `sub = \"${sub}\"`,
+            Limit: 1,
+        }));
+
+        const firstUser = response.Users?.[0];
+        if (!firstUser?.Username) {
+            continue;
+        }
+
+        const email = firstUser.Attributes?.find((attr) => attr.Name === 'email')?.Value;
+        matches.push({
+            sub,
+            username: firstUser.Username,
+            email,
+            status: firstUser.UserStatus,
+        });
+    }
+
+    return matches;
+}
+
+async function deleteCognitoUsers(
+    cognitoUsers: CognitoUserMatch[],
+    config: AwsReadyConfig,
+    userPoolId: string
+): Promise<void> {
+    if (cognitoUsers.length === 0) {
+        return;
+    }
+
+    const client = new CognitoIdentityProviderClient({
+        region: config.region,
+        credentials: {
+            accessKeyId: config.awsAccessKeyId,
+            secretAccessKey: config.awsSecretAccessKey,
+        },
+    });
+
+    for (const cognitoUser of cognitoUsers) {
+        try {
+            logger.startSpinner(`Deleting Cognito user '${cognitoUser.username}' (sub: ${cognitoUser.sub})...`);
+            await client.send(new AdminDeleteUserCommand({
+                UserPoolId: userPoolId,
+                Username: cognitoUser.username,
+            }));
+            logger.succeedSpinner(`Cognito user '${cognitoUser.username}' deleted`);
+        } catch (error) {
+            logger.failSpinner();
+            logger.warn(`Failed to delete Cognito user '${cognitoUser.username}': ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+}
+
+function formatRecordSummary(row: JsonRecord | null, preferredFields: string[]): string {
+    if (!row) {
+        return chalk.gray('N/A');
+    }
+
+    const rendered: string[] = [];
+    for (const key of preferredFields) {
+        if (!(key in row)) {
+            continue;
+        }
+        const value = row[key];
+        if (value === null || value === undefined || value === '') {
+            continue;
+        }
+
+        if (/(^|_)(at|time|timestamp|date)$/i.test(key)) {
+            rendered.push(`${key}: ${toColomboTime(value)}`);
+        } else {
+            rendered.push(`${key}: ${String(value)}`);
+        }
+    }
+
+    if (rendered.length === 0) {
+        return chalk.gray('No matching fields');
+    }
+    return rendered.join(', ');
+}
+
+function csvEscape(value: unknown): string {
+    if (value === null || value === undefined) {
+        return '""';
+    }
+    const text = String(value).replace(/"/g, '""');
+    return `"${text}"`;
+}
+
+function toCsvLine(values: unknown[]): string {
+    return values.map((value) => csvEscape(value)).join(',');
+}
+
+function getDefaultCleanupDryRunCsvPath(): string {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    return resolve('artifacts', `cleanup-dry-run-${stamp}.csv`);
+}
+
+function buildCleanupDryRunRow(context: CleanupContext): unknown[] {
+    const accountName = getRowString(context.accountRow, ['account_name', 'name']);
+    const accountEmail = getRowString(context.accountRow, ['email']);
+    const accountId = getRowString(context.accountRow, ['id', 'account_id']);
+
+    const userNames = context.userRows
+        .map((row) => getRowString(row, ['name', 'full_name']))
+        .filter((value): value is string => Boolean(value));
+    const userEmails = context.userRows
+        .map((row) => getRowString(row, ['email']))
+        .filter((value): value is string => Boolean(value));
+
+    return [
+        context.schemaName,
+        context.accountCode,
+        getRowString(context.schemaPoolRow, ['status']) || '',
+        getRowString(context.schemaPoolRow, ['account_id']) || '',
+        toColomboTime(context.schemaPoolRow?.created_at),
+        toColomboTime(context.schemaPoolRow?.updated_at),
+        accountId || '',
+        accountName || '',
+        accountEmail || '',
+        toColomboTime(context.accountRow?.created_at),
+        toColomboTime(context.accountRow?.updated_at),
+        context.userRows.length,
+        userNames.join('; '),
+        userEmails.join('; '),
+        context.subjectIds.join('; '),
+        context.dynamoTables.join('; '),
+        context.cognitoUsers.map((u) => u.username).join('; '),
+        context.cognitoUsers.map((u) => u.email || '').filter(Boolean).join('; '),
+        context.cognitoUsers.map((u) => u.sub).join('; '),
+        context.cognitoUsers.map((u) => u.status || '').filter(Boolean).join('; '),
+        JSON.stringify(context.schemaPoolRow || {}),
+        JSON.stringify(context.accountRow || {}),
+        JSON.stringify(context.userRows || []),
+    ];
+}
+
+function parseExceptSchemas(raw: unknown): Set<string> {
+    const values = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    const normalized = values
+        .flatMap((value) => String(value).split(','))
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0);
+    return new Set<string>(normalized);
+}
+
+async function collectCleanupContext(
+    schemaName: string,
+    awsConfig: AwsReadyConfig | null,
+    cognitoUserPoolId: string | null
+): Promise<CleanupContext> {
+    const pool = await getPool();
+    const accountCode = getAccountCodeFromSchema(schemaName);
+
+    let schemaPoolRow: JsonRecord | null = null;
+    if (await tableExists('common', 'schema_pool')) {
+        const schemaPoolResult = await pool.query(
+            `SELECT to_jsonb(sp) AS row FROM common.schema_pool sp WHERE schema_name = $1 LIMIT 1`,
+            [schemaName]
+        );
+        schemaPoolRow = (schemaPoolResult.rows[0]?.row as JsonRecord | undefined) ?? null;
+    }
+
+    const accountsColumns = (await tableExists('common', 'accounts'))
+        ? await getTableColumns('common', 'accounts')
+        : new Set<string>();
+    const schemaPoolAccountId = getRowString(schemaPoolRow, ['account_id']);
+
+    const accountWhereClauses: string[] = [];
+    const accountQueryValues: unknown[] = [];
+    if (schemaPoolAccountId && accountsColumns.has('id')) {
+        accountQueryValues.push(schemaPoolAccountId);
+        accountWhereClauses.push(`a.id::text = $${accountQueryValues.length}`);
+    }
+    if (schemaPoolAccountId && accountsColumns.has('account_id')) {
+        accountQueryValues.push(schemaPoolAccountId);
+        accountWhereClauses.push(`a.account_id::text = $${accountQueryValues.length}`);
+    }
+    if (accountsColumns.has('schema_name')) {
+        accountQueryValues.push(schemaName);
+        accountWhereClauses.push(`a.schema_name = $${accountQueryValues.length}`);
+    }
+    if (accountsColumns.has('account_code')) {
+        accountQueryValues.push(accountCode);
+        accountWhereClauses.push(`a.account_code = $${accountQueryValues.length}`);
+    }
+    if (accountsColumns.has('code')) {
+        accountQueryValues.push(accountCode);
+        accountWhereClauses.push(`a.code = $${accountQueryValues.length}`);
+    }
+
+    let accountRow: JsonRecord | null = null;
+    if (accountsColumns.size > 0) {
+        const accountResult = await pool.query(
+            `SELECT to_jsonb(a) AS row FROM common.accounts a WHERE ${buildWhereClause(accountWhereClauses)} LIMIT 1`,
+            accountQueryValues
+        );
+        accountRow = (accountResult.rows[0]?.row as JsonRecord | undefined) ?? null;
+    }
+
+    const accountIdCandidates = dedupeStrings([
+        schemaPoolAccountId,
+        getRowString(accountRow, ['id', 'account_id']),
+    ]);
+
+    const usersColumns = (await tableExists('common', 'users'))
+        ? await getTableColumns('common', 'users')
+        : new Set<string>();
+
+    const userWhereClauses: string[] = [];
+    const userQueryValues: unknown[] = [];
+
+    if (accountIdCandidates.length > 0 && usersColumns.has('account_id')) {
+        userQueryValues.push(accountIdCandidates);
+        userWhereClauses.push(`u.account_id::text = ANY($${userQueryValues.length})`);
+    }
+    if (usersColumns.has('schema_name')) {
+        userQueryValues.push(schemaName);
+        userWhereClauses.push(`u.schema_name = $${userQueryValues.length}`);
+    }
+    if (usersColumns.has('account_code')) {
+        userQueryValues.push(accountCode);
+        userWhereClauses.push(`u.account_code = $${userQueryValues.length}`);
+    }
+
+    let userRows: JsonRecord[] = [];
+    if (usersColumns.size > 0) {
+        const userResult = await pool.query(
+            `SELECT to_jsonb(u) AS row FROM common.users u WHERE ${buildWhereClause(userWhereClauses)} LIMIT 25`,
+            userQueryValues
+        );
+        userRows = userResult.rows
+            .map((row) => row.row as JsonRecord | undefined)
+            .filter((row): row is JsonRecord => Boolean(row));
+    }
+
+    const subjectIds = dedupeStrings(
+        userRows.map((row) => getRowString(row, ['subject_id', 'sub', 'cognito_sub']))
+    );
+
+    const dynamoTables = awsConfig
+        ? await listDynamoTablesForAccountCode(accountCode, awsConfig)
+        : [];
+
+    let cognitoUsers: CognitoUserMatch[] = [];
+    if (awsConfig && cognitoUserPoolId) {
+        try {
+            cognitoUsers = await getCognitoUsersBySub(subjectIds, awsConfig, cognitoUserPoolId);
+        } catch (error) {
+            logger.warn(
+                `Skipping Cognito discovery for '${schemaName}': ${error instanceof Error ? error.message : String(error)}`
+            );
+        }
+    }
+
+    return {
+        schemaName,
+        accountCode,
+        schemaPoolRow,
+        accountRow,
+        userRows,
+        accountIdCandidates,
+        subjectIds,
+        dynamoTables,
+        cognitoUsers,
+        usersColumns,
+        accountsColumns,
+    };
+}
+
+async function cleanupDatabaseRelations(context: CleanupContext): Promise<void> {
+    const pool = await getPool();
+    const client = await pool.connect();
+
+    try {
+        if (!/^account_[a-z0-9_]+$/.test(context.schemaName)) {
+            throw new Error(`Refusing to drop invalid schema name: ${context.schemaName}`);
+        }
+
+        await client.query('BEGIN');
+
+        await client.query(`DROP SCHEMA IF EXISTS ${context.schemaName} CASCADE`);
+
+        if (context.usersColumns.size > 0) {
+            if (context.usersColumns.has('subject_id') && context.subjectIds.length > 0) {
+                await client.query('DELETE FROM common.users WHERE subject_id::text = ANY($1)', [context.subjectIds]);
+            }
+            if (context.usersColumns.has('sub') && context.subjectIds.length > 0) {
+                await client.query('DELETE FROM common.users WHERE sub::text = ANY($1)', [context.subjectIds]);
+            }
+            if (context.usersColumns.has('account_id') && context.accountIdCandidates.length > 0) {
+                await client.query('DELETE FROM common.users WHERE account_id::text = ANY($1)', [context.accountIdCandidates]);
+            }
+            if (context.usersColumns.has('schema_name')) {
+                await client.query('DELETE FROM common.users WHERE schema_name = $1', [context.schemaName]);
+            }
+            if (context.usersColumns.has('account_code')) {
+                await client.query('DELETE FROM common.users WHERE account_code = $1', [context.accountCode]);
+            }
+        }
+
+        if (context.accountsColumns.size > 0) {
+            if (context.accountsColumns.has('id') && context.accountIdCandidates.length > 0) {
+                await client.query('DELETE FROM common.accounts WHERE id::text = ANY($1)', [context.accountIdCandidates]);
+            }
+            if (context.accountsColumns.has('account_id') && context.accountIdCandidates.length > 0) {
+                await client.query('DELETE FROM common.accounts WHERE account_id::text = ANY($1)', [context.accountIdCandidates]);
+            }
+            if (context.accountsColumns.has('schema_name')) {
+                await client.query('DELETE FROM common.accounts WHERE schema_name = $1', [context.schemaName]);
+            }
+            if (context.accountsColumns.has('account_code')) {
+                await client.query('DELETE FROM common.accounts WHERE account_code = $1', [context.accountCode]);
+            }
+            if (context.accountsColumns.has('code')) {
+                await client.query('DELETE FROM common.accounts WHERE code = $1', [context.accountCode]);
+            }
+        }
+
+        if (await tableExists('common', 'schema_pool')) {
+            await client.query('DELETE FROM common.schema_pool WHERE schema_name = $1', [context.schemaName]);
+        }
+
+        await client.query('COMMIT');
+    } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+    } finally {
+        client.release();
     }
 }
 
@@ -292,6 +911,16 @@ program
                         default: 'us-east-1',
                         validate: (input: string) => input.trim() ? true : 'Region cannot be empty',
                     },
+                    {
+                        type: 'input',
+                        name: 'cognitoUserPoolId',
+                        message: 'AWS Cognito User Pool ID (optional):',
+                    },
+                    {
+                        type: 'input',
+                        name: 'cognitoAppClientId',
+                        message: 'AWS Cognito App Client ID (optional):',
+                    },
                 ]);
 
                 const currentConfig = await getEnvConfig(envName);
@@ -301,12 +930,20 @@ program
                         region: awsConfig.region,
                         awsAccessKeyId: awsConfig.accessKeyId,
                         awsSecretAccessKey: awsConfig.secretAccessKey,
+                        cognitoUserPoolId: awsConfig.cognitoUserPoolId?.trim() || undefined,
+                        cognitoAppClientId: awsConfig.cognitoAppClientId?.trim() || undefined,
                     });
                 }
 
                 logger.log('');
                 logger.success('✅ AWS credentials configured successfully!');
                 logger.log(`  Region: ${chalk.cyan(awsConfig.region)}`);
+                if (awsConfig.cognitoUserPoolId?.trim()) {
+                    logger.log(`  Cognito User Pool: ${chalk.cyan(awsConfig.cognitoUserPoolId.trim())}`);
+                }
+                if (awsConfig.cognitoAppClientId?.trim()) {
+                    logger.log(`  Cognito App Client: ${chalk.cyan(awsConfig.cognitoAppClientId.trim())}`);
+                }
                 logger.log('');
             }
 
@@ -572,7 +1209,7 @@ program
                     }
 
                     if (awsConfig) {
-                        await createDynamoTableForSchema(envName, result.schemaName, awsConfig);
+                        await createDynamoTablesForSchema(envName, result.schemaName, awsConfig);
                     } else {
                         logger.log('');
                         logger.info('AWS credentials not configured for this environment; skipping DynamoDB table creation.');
@@ -684,7 +1321,7 @@ program
                         results.successful.push(result.schemaName);
                         logger.success(`✓ ${chalk.cyan(result.schemaName)} created (ID: ${result.schemaId})`);
                         if (awsConfig) {
-                            await createDynamoTableForSchema(envName, result.schemaName, awsConfig);
+                            await createDynamoTablesForSchema(envName, result.schemaName, awsConfig);
                         }
 
                         // Auto-seed if --seed flag is set
@@ -871,7 +1508,7 @@ program
                     logger.warn('⚠️  This action will:');
                     logger.log('  • Drop each schema and all its objects from the database');
                     logger.log('  • Mark each schema as DELETED in the schema_pool table');
-                    logger.log('  • Delete the associated DynamoDB table for each schema');
+                    logger.log('  • Delete the associated DynamoDB tables for each schema');
                     logger.log('  • This action cannot be undone!');
                     logger.log('');
 
@@ -900,7 +1537,7 @@ program
                     try {
                         await deleteSchemaAndMark(schema.schema_name);
                         if (awsConfig) {
-                            await deleteDynamoTableForSchema(envName, schema.schema_name, awsConfig);
+                            await deleteDynamoTablesForSchema(envName, schema.schema_name, awsConfig);
                         }
                         successCount++;
                     } catch (err) {
@@ -971,7 +1608,7 @@ program
                     logger.warn('⚠️  This action will:');
                     logger.log('  • Drop the schema and all its objects from the database');
                     logger.log('  • Mark the schema as DELETED in the schema_pool table');
-                    logger.log('  • Delete the associated DynamoDB table');
+                    logger.log('  • Delete the associated DynamoDB tables');
                     logger.log('  • This action cannot be undone!');
                     logger.log('');
 
@@ -994,11 +1631,244 @@ program
                 logger.divider();
                 await deleteSchemaAndMark(schemaName);
                 if (awsConfig) {
-                    await deleteDynamoTableForSchema(envName, schemaName, awsConfig);
+                    await deleteDynamoTablesForSchema(envName, schemaName, awsConfig);
                 }
                 logger.divider();
                 logger.log('');
                 logger.success(`✅ Schema '${chalk.cyan(schemaName)}' has been successfully deleted`);
+            }
+        } catch (error) {
+            logger.failSpinner();
+            logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        } finally {
+            await closePool();
+        }
+    });
+
+program
+    .command('cleanup')
+    .description('Iteratively review and fully cleanup account schemas and related records')
+    .option('-y, --yes', 'Cleanup all discovered schemas without per-schema confirmation')
+    .option('--dry-run', 'Automatically iterate and export discovered data without deleting anything')
+    .option('--csv <file-path>', 'CSV output path for dry-run report')
+    .option('--except <schema-names...>', 'Skip one or more schema names (space or comma separated)')
+    .option('--from <schema-name>', 'Start from this schema name (inclusive)')
+    .option('--only <schema-name>', 'Only process this schema name')
+    .action(async (options) => {
+        try {
+            logger.header('🧹 Iterative Cleanup');
+            const isDryRun = options.dryRun === true;
+            const exceptSchemas = parseExceptSchemas(options.except);
+
+            const envName = await getActiveEnv();
+            if (!envName) {
+                logger.error('No active environment. Run phantm env activate first.');
+                process.exit(1);
+            }
+
+            logger.startSpinner('Testing database connection...');
+            await testConnection();
+            logger.succeedSpinner('Database connection successful');
+
+            logger.startSpinner('Verifying common schema...');
+            await verifyCommonSchema();
+            logger.succeedSpinner('Common schema verified');
+
+            const envConfig = await getEnvConfig(envName);
+            const awsConfig = getAwsConfig(envConfig);
+            const cognitoUserPoolId = envConfig?.cognitoUserPoolId || process.env.AWS_COGNITO_USER_POOL_ID || null;
+
+            if (!awsConfig) {
+                logger.warn('AWS credentials are not configured for this environment. DynamoDB/Cognito discovery will be skipped.');
+            } else if (!cognitoUserPoolId) {
+                logger.warn('Cognito User Pool ID is not configured. Cognito lookup/deletion will be skipped.');
+            }
+
+            logger.startSpinner('Discovering account schemas from database...');
+            const discoveredSchemas = await listAccountSchemasFromDb();
+            logger.succeedSpinner(`Found ${discoveredSchemas.length} schema(s) matching account_*`);
+
+            let schemasToProcess = discoveredSchemas;
+
+            if (options.only) {
+                schemasToProcess = discoveredSchemas.filter((schema) => schema === String(options.only));
+                if (schemasToProcess.length === 0) {
+                    logger.error(`Schema '${options.only}' was not found among account_* schemas.`);
+                    process.exit(1);
+                }
+            }
+
+            if (options.from) {
+                const startSchema = String(options.from);
+                const index = schemasToProcess.findIndex((schema) => schema === startSchema);
+                if (index === -1) {
+                    logger.error(`Schema '${startSchema}' not found in discovered schema list.`);
+                    process.exit(1);
+                }
+                schemasToProcess = schemasToProcess.slice(index);
+            }
+
+            if (schemasToProcess.length === 0) {
+                logger.info('No schemas to process.');
+                process.exit(0);
+            }
+
+            logger.log('');
+            logger.log(chalk.bold('Schemas queued for iterative cleanup:'));
+            schemasToProcess.forEach((schema, index) => logger.log(`  ${index + 1}. ${chalk.cyan(schema)}`));
+            if (exceptSchemas.size > 0) {
+                logger.log(`Excepted schemas: ${chalk.cyan(Array.from(exceptSchemas).join(', '))}`);
+            }
+
+            let dryRunCsvPath: string | null = null;
+            const dryRunRows: string[] = [];
+            if (isDryRun) {
+                dryRunCsvPath = options.csv ? resolve(String(options.csv)) : getDefaultCleanupDryRunCsvPath();
+                dryRunRows.push(toCsvLine([
+                    'schema_name',
+                    'account_code',
+                    'schema_pool_status',
+                    'schema_pool_account_id',
+                    'schema_pool_created_at_colombo',
+                    'schema_pool_updated_at_colombo',
+                    'account_id',
+                    'account_name',
+                    'account_email',
+                    'account_created_at_colombo',
+                    'account_updated_at_colombo',
+                    'user_count',
+                    'user_names',
+                    'user_emails',
+                    'user_subject_ids',
+                    'dynamodb_tables',
+                    'cognito_usernames',
+                    'cognito_user_emails',
+                    'cognito_subs',
+                    'cognito_statuses',
+                    'schema_pool_json',
+                    'account_json',
+                    'users_json',
+                ]));
+                logger.info(`Dry-run mode enabled. No deletes will be performed.`);
+            }
+
+            let cleaned = 0;
+            let skipped = 0;
+            let failed = 0;
+
+            for (let index = 0; index < schemasToProcess.length; index++) {
+                const schemaName = schemasToProcess[index];
+                logger.log('');
+                logger.divider();
+                logger.log(chalk.bold(`[${index + 1}/${schemasToProcess.length}] ${schemaName}`));
+
+                if (exceptSchemas.has(schemaName)) {
+                    logger.warn(`'${schemaName}' is an excepted schema. Skipping.`);
+                    skipped++;
+                    continue;
+                }
+
+                const context = await collectCleanupContext(schemaName, awsConfig, cognitoUserPoolId);
+                if (isDryRun) {
+                    dryRunRows.push(toCsvLine(buildCleanupDryRunRow(context)));
+                }
+
+                logger.log(chalk.bold('Database Relations:'));
+                logger.log(`  schema_pool: ${formatRecordSummary(context.schemaPoolRow, ['schema_id', 'schema_name', 'status', 'account_id', 'created_at', 'updated_at', 'allocated_at'])}`);
+                logger.log(`  accounts:    ${formatRecordSummary(context.accountRow, ['id', 'account_id', 'account_name', 'name', 'account_code', 'code', 'email', 'created_at', 'updated_at'])}`);
+
+                if (context.userRows.length === 0) {
+                    logger.log(`  users:       ${chalk.gray('No related users found')}`);
+                } else {
+                    logger.log(`  users:       ${chalk.cyan(context.userRows.length)} related record(s)`);
+                    context.userRows.slice(0, 5).forEach((user, userIndex) => {
+                        logger.log(`    ${userIndex + 1}. ${formatRecordSummary(user, ['id', 'user_id', 'name', 'full_name', 'email', 'subject_id', 'sub', 'created_at', 'updated_at'])}`);
+                    });
+                    if (context.userRows.length > 5) {
+                        logger.log(`    ... and ${context.userRows.length - 5} more`);
+                    }
+                }
+
+                logger.log('');
+                logger.log(chalk.bold('AWS Discovery:'));
+                if (!awsConfig) {
+                    logger.log(`  DynamoDB: ${chalk.gray('Skipped (AWS not configured)')}`);
+                    logger.log(`  Cognito:  ${chalk.gray('Skipped (AWS not configured)')}`);
+                } else {
+                    logger.log(`  DynamoDB tables: ${context.dynamoTables.length > 0 ? context.dynamoTables.map((table) => chalk.cyan(table)).join(', ') : chalk.gray('None found')}`);
+                    if (!cognitoUserPoolId) {
+                        logger.log(`  Cognito users:  ${chalk.gray('Skipped (User Pool ID not configured)')}`);
+                    } else if (context.cognitoUsers.length === 0) {
+                        logger.log(`  Cognito users:  ${chalk.gray('No matches found by sub')}`);
+                    } else {
+                        context.cognitoUsers.forEach((user) => {
+                            logger.log(`  Cognito user:   sub=${chalk.cyan(user.sub)}, username=${chalk.cyan(user.username)}, email=${chalk.cyan(user.email || 'N/A')}, status=${chalk.cyan(user.status || 'N/A')}`);
+                        });
+                    }
+                }
+
+                let proceed = isDryRun || Boolean(options.yes);
+                if (!proceed) {
+                    logger.log('');
+                    const answer = await inquirer.prompt([
+                        {
+                            type: 'confirm',
+                            name: 'proceed',
+                            message: `Cleanup '${schemaName}' and all discovered related records/resources?`,
+                            default: false,
+                        },
+                    ]);
+                    proceed = answer.proceed === true;
+                }
+
+                if (!proceed) {
+                    logger.info(`Skipped '${schemaName}'`);
+                    skipped++;
+                    continue;
+                }
+
+                if (isDryRun) {
+                    logger.info(`Dry-run captured '${schemaName}' (no deletions executed)`);
+                    continue;
+                }
+
+                try {
+                    logger.startSpinner('Cleaning database artifacts (schema + common tables)...');
+                    await cleanupDatabaseRelations(context);
+                    logger.succeedSpinner('Database cleanup completed');
+
+                    if (awsConfig) {
+                        await deleteDynamoTablesByName(context.dynamoTables, awsConfig);
+                        if (cognitoUserPoolId) {
+                            await deleteCognitoUsers(context.cognitoUsers, awsConfig, cognitoUserPoolId);
+                        }
+                    }
+
+                    cleaned++;
+                    logger.success(`Cleanup completed for '${schemaName}'`);
+                } catch (error) {
+                    failed++;
+                    logger.error(`Cleanup failed for '${schemaName}': ${error instanceof Error ? error.message : String(error)}`);
+                }
+            }
+
+            logger.log('');
+            logger.divider();
+            logger.header('📊 Cleanup Summary');
+            logger.log(`  Processed: ${chalk.cyan(schemasToProcess.length)}`);
+            logger.log(`  Cleaned:   ${chalk.cyan(cleaned)}`);
+            logger.log(`  Skipped:   ${chalk.cyan(skipped)}`);
+            logger.log(`  Failed:    ${chalk.cyan(failed)}`);
+
+            if (isDryRun && dryRunCsvPath) {
+                await mkdir(dirname(dryRunCsvPath), { recursive: true });
+                await writeFile(dryRunCsvPath, `${dryRunRows.join('\n')}\n`, 'utf-8');
+                logger.log(`  Dry-run CSV: ${chalk.cyan(dryRunCsvPath)}`);
+            }
+
+            if (failed > 0) {
+                process.exit(1);
             }
         } catch (error) {
             logger.failSpinner();
