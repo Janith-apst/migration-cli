@@ -17,6 +17,8 @@ export interface DatabaseConfig {
     region?: string;
     awsAccessKeyId?: string;
     awsSecretAccessKey?: string;
+    cognitoUserPoolId?: string;
+    cognitoAppClientId?: string;
 }
 
 export interface ConfigFile {

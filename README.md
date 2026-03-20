@@ -469,6 +469,70 @@ phantm delete --all-available -y
 
 > **Note:** The delete command performs a soft-delete — schemas are marked as `DELETED` in the `schema_pool` table rather than being removed entirely. If AWS credentials are configured, the associated DynamoDB table is also deleted.
 
+### 6. Iterative Full Cleanup (NEW)
+
+`cleanup` is an iterative, per-schema destructive flow designed for full account cleanup.
+
+For each `account_*` schema found in the database, it will:
+- Load related records from `common.schema_pool`, `common.accounts`, and `common.users`
+- Show key details (including names/emails and timestamps formatted in `+05:30` timezone)
+- Discover matching DynamoDB tables by account code (`prep-data` and `event_data` patterns)
+- Resolve Cognito users by `sub` (mapped from `common.users.subject_id`)
+- Ask for confirmation before cleanup of that schema
+
+If confirmed, it will:
+- Drop the schema
+- Delete related rows from `common.users`, `common.accounts`, and `common.schema_pool`
+- Delete discovered DynamoDB tables
+- Delete discovered Cognito users
+
+If declined, it skips that schema and continues to the next one.
+
+Run interactive iterative cleanup:
+
+```bash
+phantm cleanup
+```
+
+Cleanup all discovered schemas without per-schema prompt:
+
+```bash
+phantm cleanup --yes
+```
+
+Start iteration from a specific schema (inclusive):
+
+```bash
+phantm cleanup --from account_fgwzgd0u
+```
+
+Process only one schema:
+
+```bash
+phantm cleanup --only account_fgwzgd0u
+```
+
+Skip specific schemas during cleanup:
+
+```bash
+phantm cleanup --except account_keep1 account_keep2
+phantm cleanup --except account_keep1,account_keep2
+```
+
+Dry-run full discovery (no deletes), auto-iterate all schemas, and write CSV report:
+
+```bash
+phantm cleanup --dry-run
+```
+
+Dry-run with custom CSV output path:
+
+```bash
+phantm cleanup --dry-run --csv ./artifacts/cleanup-report.csv
+```
+
+> **Cognito requirement:** set `cognitoUserPoolId` in environment config (or `AWS_COGNITO_USER_POOL_ID`) to enable Cognito discovery/deletion. You can also store `cognitoAppClientId` during `phantm configure` for future Cognito workflows.
+
 ## Quick Start Example
 
 ```bash
@@ -493,7 +557,10 @@ phantm list
 
 ## AWS DynamoDB Integration
 
-The migration CLI integrates with AWS DynamoDB to create auxiliary data tables alongside your PostgreSQL schemas. When you create a schema, you can optionally create a corresponding DynamoDB table with the naming format: `${environment}-prep-data-${accountCode}`.
+The migration CLI integrates with AWS DynamoDB to create auxiliary data tables alongside your PostgreSQL schemas. When you create a schema, it can create these DynamoDB tables:
+
+- `prep-data`: `${environment}-prep-data-${accountCode}`
+- `event_data`: `${environment}-event_data_${accountCode}`
 
 ### Configure AWS Credentials
 
@@ -521,10 +588,14 @@ phantm create
 The workflow:
 1. Schema is created (e.g., `account_ps97wn2h`)
 2. Record is inserted into `schema_pool` table
-3. If AWS is configured, a DynamoDB table is created with format: `${environment}-prep-data-${accountCode}`
-   - Example: `dev-prep-data-ps97wn2h`
-   - Partition key: `product_id` (String)
-   - Attributes available: `prep_project` (for JSON data), `created_at` (timestamp)
+3. If AWS is configured, two DynamoDB tables are created in on-demand mode:
+   - `${environment}-prep-data-${accountCode}`
+     - Example: `dev-prep-data-ps97wn2h`
+     - Partition key: `product_id` (String)
+   - `${environment}-event_data_${accountCode}`
+     - Example: `dev-event_data_ps97wn2h`
+     - Partition key: `source_id` (String)
+     - Sort key: `entity` (String)
 
 ### DynamoDB Tables
 
@@ -533,6 +604,31 @@ List all tables in the configured region:
 ```bash
 phantm dynamodb:list-tables
 ```
+
+Preview managed tables that would be converted to on-demand billing for the active environment:
+
+```bash
+phantm dynamodb:convert-on-demand
+```
+
+Apply the conversion:
+
+```bash
+phantm dynamodb:convert-on-demand --apply
+```
+
+Skip the confirmation prompt when applying:
+
+```bash
+phantm dynamodb:convert-on-demand --apply -y
+```
+
+`dynamodb:convert-on-demand` only targets tables for the selected environment whose names start with:
+
+- `${environment}-prep-data-`
+- `${environment}-event_data_`
+
+By default it runs in dry-run mode, shows each table's current billing mode, and reports what would be converted.
 
 ### Setup Guide
 
