@@ -66,8 +66,12 @@ function getAwsConfig(config: DatabaseConfig | null | undefined): AwsReadyConfig
     return null;
 }
 
+function getAccountCodeFromSchemaName(schemaName: string): string {
+    return schemaName.replace('account_', '').replace(/_/g, '');
+}
+
 async function createDynamoTableForSchema(envName: string, schemaName: string, config: AwsReadyConfig): Promise<void> {
-    const accountCode = schemaName.replace('account_', '').replace(/_/g, '');
+    const accountCode = getAccountCodeFromSchemaName(schemaName);
     const tableName = `${envName}-prep-data-${accountCode}`;
 
     logger.log('');
@@ -111,7 +115,7 @@ async function createDynamoTableForSchema(envName: string, schemaName: string, c
 }
 
 async function createEventDataDynamoTableForSchema(envName: string, schemaName: string, config: AwsReadyConfig): Promise<void> {
-    const accountCode = schemaName.replace('account_', '').replace(/_/g, '');
+    const accountCode = getAccountCodeFromSchemaName(schemaName);
     const tableName = `${envName}-event_data_${accountCode}`;
 
     logger.log('');
@@ -162,7 +166,7 @@ async function createDynamoTablesForSchema(envName: string, schemaName: string, 
 }
 
 async function deleteDynamoTableForSchema(envName: string, schemaName: string, config: AwsReadyConfig): Promise<void> {
-    const accountCode = schemaName.replace('account_', '').replace(/_/g, '');
+    const accountCode = getAccountCodeFromSchemaName(schemaName);
     const tableName = `${envName}-prep-data-${accountCode}`;
 
     try {
@@ -188,27 +192,32 @@ async function deleteDynamoTableForSchema(envName: string, schemaName: string, c
 }
 
 async function deleteEventDataDynamoTableForSchema(envName: string, schemaName: string, config: AwsReadyConfig): Promise<void> {
-    const accountCode = schemaName.replace('account_', '').replace(/_/g, '');
-    const tableName = `${envName}-event_data_${accountCode}`;
+    const accountCode = getAccountCodeFromSchemaName(schemaName);
+    const tableNames = Array.from(new Set([
+        `${envName}-event_data_${accountCode}`,
+        `${envName}-event_data-${accountCode}`,
+    ]));
 
-    try {
-        logger.startSpinner(`Deleting DynamoDB table '${tableName}'...`);
-        const dynamoDB = new DynamoDBClient({
-            region: config.region,
-            credentials: {
-                accessKeyId: config.awsAccessKeyId,
-                secretAccessKey: config.awsSecretAccessKey,
-            },
-        });
+    for (const tableName of tableNames) {
+        try {
+            logger.startSpinner(`Deleting DynamoDB table '${tableName}'...`);
+            const dynamoDB = new DynamoDBClient({
+                region: config.region,
+                credentials: {
+                    accessKeyId: config.awsAccessKeyId,
+                    secretAccessKey: config.awsSecretAccessKey,
+                },
+            });
 
-        await dynamoDB.send(new DeleteTableCommand({ TableName: tableName }));
-        logger.succeedSpinner(`DynamoDB table '${tableName}' deleted`);
-    } catch (dynamoError: any) {
-        if (dynamoError?.name === 'ResourceNotFoundException') {
-            logger.succeedSpinner(`DynamoDB table '${tableName}' does not exist (skipped)`);
-        } else {
-            logger.failSpinner();
-            logger.warn(`Failed to delete DynamoDB table '${tableName}': ${dynamoError instanceof Error ? dynamoError.message : String(dynamoError)}`);
+            await dynamoDB.send(new DeleteTableCommand({ TableName: tableName }));
+            logger.succeedSpinner(`DynamoDB table '${tableName}' deleted`);
+        } catch (dynamoError: any) {
+            if (dynamoError?.name === 'ResourceNotFoundException') {
+                logger.succeedSpinner(`DynamoDB table '${tableName}' does not exist (skipped)`);
+            } else {
+                logger.failSpinner();
+                logger.warn(`Failed to delete DynamoDB table '${tableName}': ${dynamoError instanceof Error ? dynamoError.message : String(dynamoError)}`);
+            }
         }
     }
 }
