@@ -25,7 +25,14 @@ import {
     suggestTableOrderByForeignKeys,
     truncateTableForImport,
 } from './import/executor.js';
-import { DynamoDBClient, CreateTableCommand, ListTablesCommand, DeleteTableCommand } from '@aws-sdk/client-dynamodb';
+import {
+    DynamoDBClient,
+    CreateTableCommand,
+    ListTablesCommand,
+    DeleteTableCommand,
+    DescribeTableCommand,
+    UpdateTableCommand,
+} from '@aws-sdk/client-dynamodb';
 import {
     CognitoIdentityProviderClient,
     ListUsersCommand,
@@ -59,6 +66,16 @@ type AwsReadyConfig = DatabaseConfig & {
     awsSecretAccessKey: string;
 };
 
+type DynamoBillingMode = 'PAY_PER_REQUEST' | 'PROVISIONED';
+
+type DynamoTableInspection = {
+    tableName: string;
+    billingMode?: DynamoBillingMode;
+    tableStatus?: string;
+    needsConversion: boolean;
+    error?: string;
+};
+
 function getAwsConfig(config: DatabaseConfig | null | undefined): AwsReadyConfig | null {
     if (config?.region && config.awsAccessKeyId && config.awsSecretAccessKey) {
         return config as AwsReadyConfig;
@@ -68,6 +85,87 @@ function getAwsConfig(config: DatabaseConfig | null | undefined): AwsReadyConfig
 
 function getAccountCodeFromSchemaName(schemaName: string): string {
     return schemaName.replace('account_', '').replace(/_/g, '');
+}
+
+function createDynamoClient(config: AwsReadyConfig): DynamoDBClient {
+    return new DynamoDBClient({
+        region: config.region,
+        credentials: {
+            accessKeyId: config.awsAccessKeyId,
+            secretAccessKey: config.awsSecretAccessKey,
+        },
+    });
+}
+
+function getManagedDynamoTablePrefixes(envName: string): string[] {
+    return [
+        `${envName}-prep-data-`,
+        `${envName}-event_data_`,
+    ];
+}
+
+function isManagedDynamoTableForEnv(tableName: string, envName: string): boolean {
+    return getManagedDynamoTablePrefixes(envName).some((prefix) => tableName.startsWith(prefix));
+}
+
+async function listAllDynamoTableNames(client: DynamoDBClient): Promise<string[]> {
+    let lastEvaluatedTableName: string | undefined;
+    const allTables: string[] = [];
+
+    do {
+        const response = await client.send(new ListTablesCommand({ ExclusiveStartTableName: lastEvaluatedTableName }));
+        if (response.TableNames) {
+            allTables.push(...response.TableNames);
+        }
+        lastEvaluatedTableName = response.LastEvaluatedTableName;
+    } while (lastEvaluatedTableName);
+
+    return allTables;
+}
+
+async function listManagedDynamoTablesForEnv(envName: string, config: AwsReadyConfig): Promise<string[]> {
+    const client = createDynamoClient(config);
+    const allTables = await listAllDynamoTableNames(client);
+    return allTables
+        .filter((tableName) => isManagedDynamoTableForEnv(tableName, envName))
+        .sort((left, right) => left.localeCompare(right));
+}
+
+function getBillingModeFromTableDescription(table: { BillingModeSummary?: { BillingMode?: string } } | undefined): DynamoBillingMode {
+    return table?.BillingModeSummary?.BillingMode === 'PAY_PER_REQUEST' ? 'PAY_PER_REQUEST' : 'PROVISIONED';
+}
+
+async function inspectDynamoTable(client: DynamoDBClient, tableName: string): Promise<DynamoTableInspection> {
+    try {
+        const response = await client.send(new DescribeTableCommand({ TableName: tableName }));
+        const billingMode = getBillingModeFromTableDescription(response.Table);
+        return {
+            tableName,
+            billingMode,
+            tableStatus: response.Table?.TableStatus,
+            needsConversion: billingMode !== 'PAY_PER_REQUEST',
+        };
+    } catch (error) {
+        return {
+            tableName,
+            needsConversion: false,
+            error: error instanceof Error ? error.message : String(error),
+        };
+    }
+}
+
+async function waitForDynamoTableActive(client: DynamoDBClient, tableName: string, timeoutMs = 120_000, intervalMs = 3_000): Promise<void> {
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+        const response = await client.send(new DescribeTableCommand({ TableName: tableName }));
+        if (response.Table?.TableStatus === 'ACTIVE') {
+            return;
+        }
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, intervalMs));
+    }
+
+    throw new Error(`Timed out waiting for DynamoDB table '${tableName}' to become ACTIVE`);
 }
 
 async function createDynamoTableForSchema(envName: string, schemaName: string, config: AwsReadyConfig): Promise<void> {
@@ -82,13 +180,7 @@ async function createDynamoTableForSchema(envName: string, schemaName: string, c
 
     try {
         logger.startSpinner('Creating DynamoDB table...');
-        const dynamoDB = new DynamoDBClient({
-            region: config.region,
-            credentials: {
-                accessKeyId: config.awsAccessKeyId,
-                secretAccessKey: config.awsSecretAccessKey,
-            },
-        });
+        const dynamoDB = createDynamoClient(config);
 
         await dynamoDB.send(new CreateTableCommand({
             TableName: tableName,
@@ -98,15 +190,12 @@ async function createDynamoTableForSchema(envName: string, schemaName: string, c
             AttributeDefinitions: [
                 { AttributeName: 'product_id', AttributeType: 'S' },
             ],
-            ProvisionedThroughput: {
-                ReadCapacityUnits: 5,
-                WriteCapacityUnits: 5,
-            },
+            BillingMode: 'PAY_PER_REQUEST',
         }));
 
-        logger.succeedSpinner('DynamoDB table created successfully');
+        logger.succeedSpinner('DynamoDB table created successfully (on-demand billing)');
         logger.log('');
-        logger.success(`✅ DynamoDB table '${chalk.cyan(tableName)}' created!`);
+        logger.success(`✅ DynamoDB table '${chalk.cyan(tableName)}' created with on-demand billing!`);
     } catch (dynamoError) {
         logger.failSpinner();
         logger.error(`DynamoDB table creation failed for '${tableName}': ${dynamoError instanceof Error ? dynamoError.message : String(dynamoError)}`);
@@ -126,13 +215,7 @@ async function createEventDataDynamoTableForSchema(envName: string, schemaName: 
 
     try {
         logger.startSpinner('Creating DynamoDB event_data table...');
-        const dynamoDB = new DynamoDBClient({
-            region: config.region,
-            credentials: {
-                accessKeyId: config.awsAccessKeyId,
-                secretAccessKey: config.awsSecretAccessKey,
-            },
-        });
+        const dynamoDB = createDynamoClient(config);
 
         await dynamoDB.send(new CreateTableCommand({
             TableName: tableName,
@@ -144,15 +227,12 @@ async function createEventDataDynamoTableForSchema(envName: string, schemaName: 
                 { AttributeName: 'source_id', AttributeType: 'S' },
                 { AttributeName: 'entity', AttributeType: 'S' },
             ],
-            ProvisionedThroughput: {
-                ReadCapacityUnits: 5,
-                WriteCapacityUnits: 5,
-            },
+            BillingMode: 'PAY_PER_REQUEST',
         }));
 
-        logger.succeedSpinner('DynamoDB event_data table created successfully');
+        logger.succeedSpinner('DynamoDB event_data table created successfully (on-demand billing)');
         logger.log('');
-        logger.success(`✅ DynamoDB table '${chalk.cyan(tableName)}' created!`);
+        logger.success(`✅ DynamoDB table '${chalk.cyan(tableName)}' created with on-demand billing!`);
     } catch (dynamoError) {
         logger.failSpinner();
         logger.error(`DynamoDB table creation failed for '${tableName}': ${dynamoError instanceof Error ? dynamoError.message : String(dynamoError)}`);
@@ -171,13 +251,7 @@ async function deleteDynamoTableForSchema(envName: string, schemaName: string, c
 
     try {
         logger.startSpinner(`Deleting DynamoDB table '${tableName}'...`);
-        const dynamoDB = new DynamoDBClient({
-            region: config.region,
-            credentials: {
-                accessKeyId: config.awsAccessKeyId,
-                secretAccessKey: config.awsSecretAccessKey,
-            },
-        });
+        const dynamoDB = createDynamoClient(config);
 
         await dynamoDB.send(new DeleteTableCommand({ TableName: tableName }));
         logger.succeedSpinner(`DynamoDB table '${tableName}' deleted`);
@@ -201,13 +275,7 @@ async function deleteEventDataDynamoTableForSchema(envName: string, schemaName: 
     for (const tableName of tableNames) {
         try {
             logger.startSpinner(`Deleting DynamoDB table '${tableName}'...`);
-            const dynamoDB = new DynamoDBClient({
-                region: config.region,
-                credentials: {
-                    accessKeyId: config.awsAccessKeyId,
-                    secretAccessKey: config.awsSecretAccessKey,
-                },
-            });
+            const dynamoDB = createDynamoClient(config);
 
             await dynamoDB.send(new DeleteTableCommand({ TableName: tableName }));
             logger.succeedSpinner(`DynamoDB table '${tableName}' deleted`);
@@ -351,24 +419,8 @@ async function listAccountSchemasFromDb(): Promise<string[]> {
 }
 
 async function listDynamoTablesForAccountCode(accountCode: string, config: AwsReadyConfig): Promise<string[]> {
-    const client = new DynamoDBClient({
-        region: config.region,
-        credentials: {
-            accessKeyId: config.awsAccessKeyId,
-            secretAccessKey: config.awsSecretAccessKey,
-        },
-    });
-
-    let lastEvaluatedTableName: string | undefined;
-    const allTables: string[] = [];
-
-    do {
-        const response = await client.send(new ListTablesCommand({ ExclusiveStartTableName: lastEvaluatedTableName }));
-        if (response.TableNames) {
-            allTables.push(...response.TableNames);
-        }
-        lastEvaluatedTableName = response.LastEvaluatedTableName;
-    } while (lastEvaluatedTableName);
+    const client = createDynamoClient(config);
+    const allTables = await listAllDynamoTableNames(client);
 
     const normalizedCode = accountCode.toLowerCase();
     return allTables.filter((name) => {
@@ -382,13 +434,7 @@ async function deleteDynamoTablesByName(tableNames: string[], config: AwsReadyCo
         return;
     }
 
-    const client = new DynamoDBClient({
-        region: config.region,
-        credentials: {
-            accessKeyId: config.awsAccessKeyId,
-            secretAccessKey: config.awsSecretAccessKey,
-        },
-    });
+    const client = createDynamoClient(config);
 
     for (const tableName of tableNames) {
         try {
@@ -2454,35 +2500,174 @@ program
                 process.exit(1);
             }
 
-            if (!config.region) {
-                logger.error('AWS region not configured. Please configure AWS credentials first.');
+            const awsConfig = getAwsConfig(config);
+            if (!awsConfig) {
+                logger.error('AWS credentials are not configured for this environment. Please configure AWS credentials first.');
                 process.exit(1);
             }
 
             logger.log('');
             logger.log(chalk.bold('Configuration:'));
             logger.log(`  Environment: ${chalk.cyan(envName)}`);
-            logger.log(`  Region:      ${chalk.cyan(config.region)}`);
+            logger.log(`  Region:      ${chalk.cyan(awsConfig.region)}`);
             logger.log('');
 
             logger.startSpinner('Fetching tables...');
-            const dynamoDB = new DynamoDBClient({
-                region: config.region,
-                credentials: {
-                    accessKeyId: config.awsAccessKeyId!,
-                    secretAccessKey: config.awsSecretAccessKey!,
-                },
-            });
-            const tables = await dynamoDB.send(new ListTablesCommand({}));
-            logger.succeedSpinner(`Found ${tables.TableNames?.length} table(s)`);
+            const dynamoDB = createDynamoClient(awsConfig);
+            const tableNames = await listAllDynamoTableNames(dynamoDB);
+            logger.succeedSpinner(`Found ${tableNames.length} table(s)`);
 
-            if (tables.TableNames && tables.TableNames.length > 0) {
+            if (tableNames.length > 0) {
                 logger.log('');
-                tables.TableNames.forEach((tableName, index) => {
+                tableNames.forEach((tableName, index) => {
                     logger.log(`  ${index + 1}. ${chalk.cyan(tableName)}`);
                 });
             } else {
                 logger.info('No tables found');
+            }
+        } catch (error) {
+            logger.failSpinner();
+            logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        }
+    });
+
+program
+    .command('dynamodb:convert-on-demand')
+    .description('Preview or convert managed DynamoDB tables for the selected environment to on-demand billing')
+    .option('--apply', 'Convert matching provisioned tables to on-demand billing')
+    .option('-y, --yes', 'Skip confirmation prompt when used with --apply')
+    .action(async (options) => {
+        try {
+            logger.header('⚡ DynamoDB On-Demand Conversion');
+
+            const envName = (await getActiveEnv()) || (await promptEnvSelection('Select environment for DynamoDB conversion:'));
+            const envConfig = await getEnvConfig(envName);
+            if (!envConfig) {
+                logger.error(`Environment '${envName}' not found`);
+                process.exit(1);
+            }
+
+            const awsConfig = getAwsConfig(envConfig);
+            if (!awsConfig) {
+                logger.error('AWS credentials are not configured for this environment. Please configure AWS credentials first.');
+                process.exit(1);
+            }
+
+            logger.log('');
+            logger.log(chalk.bold('Configuration:'));
+            logger.log(`  Environment: ${chalk.cyan(envName)}`);
+            logger.log(`  Region:      ${chalk.cyan(awsConfig.region)}`);
+            logger.log(`  Mode:        ${chalk.cyan(options.apply ? 'apply' : 'dry-run')}`);
+            logger.log('');
+
+            logger.startSpinner('Discovering managed DynamoDB tables...');
+            const tableNames = await listManagedDynamoTablesForEnv(envName, awsConfig);
+            logger.succeedSpinner(`Found ${tableNames.length} managed table(s)`);
+
+            if (tableNames.length === 0) {
+                logger.info('No matching prep-data or event_data tables found for this environment.');
+                process.exit(0);
+            }
+
+            logger.startSpinner('Inspecting table billing modes...');
+            const client = createDynamoClient(awsConfig);
+            const inspections = await Promise.all(tableNames.map((tableName) => inspectDynamoTable(client, tableName)));
+            logger.succeedSpinner('Table inspection complete');
+
+            const alreadyOnDemand = inspections.filter((item) => !item.error && item.billingMode === 'PAY_PER_REQUEST');
+            const toConvert = inspections.filter((item) => !item.error && item.needsConversion);
+            const failedToDescribe = inspections.filter((item) => item.error);
+
+            logger.log('');
+            logger.log(chalk.bold('Table Plan:'));
+            inspections.forEach((item, index) => {
+                const currentMode = item.error
+                    ? chalk.red('ERROR')
+                    : item.billingMode === 'PAY_PER_REQUEST'
+                        ? chalk.green('PAY_PER_REQUEST')
+                        : chalk.yellow('PROVISIONED');
+                const action = item.error
+                    ? chalk.red('inspect failed')
+                    : item.needsConversion
+                        ? chalk.yellow('convert to PAY_PER_REQUEST')
+                        : chalk.green('no change');
+                const status = item.tableStatus ? chalk.gray(` (${item.tableStatus})`) : '';
+                logger.log(`  ${index + 1}. ${chalk.cyan(item.tableName)} - ${currentMode}${status} -> ${action}`);
+                if (item.error) {
+                    logger.log(`     ${chalk.red(item.error)}`);
+                }
+            });
+
+            logger.log('');
+            logger.log(chalk.bold('Summary:'));
+            logger.log(`  Matched:            ${chalk.cyan(inspections.length)}`);
+            logger.log(`  Already on-demand:  ${chalk.cyan(alreadyOnDemand.length)}`);
+            logger.log(`  To convert:         ${chalk.cyan(toConvert.length)}`);
+            logger.log(`  Failed to describe: ${chalk.cyan(failedToDescribe.length)}`);
+
+            if (!options.apply) {
+                logger.log('');
+                logger.info('Dry-run complete. Re-run with --apply to convert the provisioned tables.');
+                process.exit(0);
+            }
+
+            if (toConvert.length === 0) {
+                logger.log('');
+                logger.info('No provisioned tables need conversion.');
+                if (failedToDescribe.length > 0) {
+                    process.exit(1);
+                }
+                process.exit(0);
+            }
+
+            if (!options.yes) {
+                logger.log('');
+                const answer = await inquirer.prompt([
+                    {
+                        type: 'confirm',
+                        name: 'proceed',
+                        message: `Convert ${toConvert.length} DynamoDB table(s) to on-demand billing?`,
+                        default: false,
+                    },
+                ]);
+
+                if (!answer.proceed) {
+                    logger.info('Conversion cancelled');
+                    process.exit(0);
+                }
+            }
+
+            let convertedCount = 0;
+            let conversionFailures = 0;
+
+            for (const item of toConvert) {
+                try {
+                    logger.startSpinner(`Converting '${item.tableName}' to on-demand billing...`);
+                    await client.send(new UpdateTableCommand({
+                        TableName: item.tableName,
+                        BillingMode: 'PAY_PER_REQUEST',
+                    }));
+                    await waitForDynamoTableActive(client, item.tableName);
+                    logger.succeedSpinner(`DynamoDB table '${item.tableName}' converted to on-demand billing`);
+                    convertedCount++;
+                } catch (error) {
+                    logger.failSpinner();
+                    logger.warn(`Failed to convert DynamoDB table '${item.tableName}': ${error instanceof Error ? error.message : String(error)}`);
+                    conversionFailures++;
+                }
+            }
+
+            logger.log('');
+            logger.log(chalk.bold('Conversion Summary:'));
+            logger.log(`  Matched:            ${chalk.cyan(inspections.length)}`);
+            logger.log(`  Already on-demand:  ${chalk.cyan(alreadyOnDemand.length)}`);
+            logger.log(`  Converted:          ${chalk.cyan(convertedCount)}`);
+            logger.log(`  Failed to describe: ${chalk.cyan(failedToDescribe.length)}`);
+            logger.log(`  Failed to convert:  ${chalk.cyan(conversionFailures)}`);
+
+            if (failedToDescribe.length > 0 || conversionFailures > 0) {
+                process.exit(1);
             }
         } catch (error) {
             logger.failSpinner();

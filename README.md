@@ -557,7 +557,10 @@ phantm list
 
 ## AWS DynamoDB Integration
 
-The migration CLI integrates with AWS DynamoDB to create auxiliary data tables alongside your PostgreSQL schemas. When you create a schema, you can optionally create a corresponding DynamoDB table with the naming format: `${environment}-prep-data-${accountCode}`.
+The migration CLI integrates with AWS DynamoDB to create auxiliary data tables alongside your PostgreSQL schemas. When you create a schema, it can create these DynamoDB tables:
+
+- `prep-data`: `${environment}-prep-data-${accountCode}`
+- `event_data`: `${environment}-event_data_${accountCode}`
 
 ### Configure AWS Credentials
 
@@ -585,10 +588,14 @@ phantm create
 The workflow:
 1. Schema is created (e.g., `account_ps97wn2h`)
 2. Record is inserted into `schema_pool` table
-3. If AWS is configured, a DynamoDB table is created with format: `${environment}-prep-data-${accountCode}`
-   - Example: `dev-prep-data-ps97wn2h`
-   - Partition key: `product_id` (String)
-   - Attributes available: `prep_project` (for JSON data), `created_at` (timestamp)
+3. If AWS is configured, two DynamoDB tables are created in on-demand mode:
+   - `${environment}-prep-data-${accountCode}`
+     - Example: `dev-prep-data-ps97wn2h`
+     - Partition key: `product_id` (String)
+   - `${environment}-event_data_${accountCode}`
+     - Example: `dev-event_data_ps97wn2h`
+     - Partition key: `source_id` (String)
+     - Sort key: `entity` (String)
 
 ### DynamoDB Tables
 
@@ -597,6 +604,31 @@ List all tables in the configured region:
 ```bash
 phantm dynamodb:list-tables
 ```
+
+Preview managed tables that would be converted to on-demand billing for the active environment:
+
+```bash
+phantm dynamodb:convert-on-demand
+```
+
+Apply the conversion:
+
+```bash
+phantm dynamodb:convert-on-demand --apply
+```
+
+Skip the confirmation prompt when applying:
+
+```bash
+phantm dynamodb:convert-on-demand --apply -y
+```
+
+`dynamodb:convert-on-demand` only targets tables for the selected environment whose names start with:
+
+- `${environment}-prep-data-`
+- `${environment}-event_data_`
+
+By default it runs in dry-run mode, shows each table's current billing mode, and reports what would be converted.
 
 ### Setup Guide
 
