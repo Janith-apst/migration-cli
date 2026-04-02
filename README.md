@@ -263,7 +263,33 @@ phantm create --name account_demo --seed
 
 Each schema will be seeded immediately after creation. In bulk mode, seeding failures for one schema do not block the rest.
 
-### 4. CSV Data Import (NEW)
+### 4. Apply Arbitrary SQL Across Schemas
+
+You can run a SQL file against every schema in `common.schema_pool` with status `AVAILABLE` or `ALLOCATED`.
+
+The command supports SQL that uses `{{SCHEMA_NAME}}`, and it also sets `search_path` to the target schema so unqualified SQL can work too.
+
+Run a SQL file with per-schema confirmation:
+
+```bash
+phantm apply --sql ./ack.sql
+```
+
+Skip the per-schema confirmation prompts:
+
+```bash
+phantm apply --sql ./ack.sql --yes
+```
+
+Behavior:
+- Prompts for an environment if no active environment is set
+- Verifies database connectivity and `common.schema_pool`
+- Shows each target schema's name and status before execution
+- Runs the SQL in a transaction per schema
+- On failure, rolls back that schema and asks whether to continue
+- Prints an apply summary with applied, skipped, and failed counts
+
+### 5. CSV Data Import (NEW)
 
 Import CSV data into existing schemas using this folder structure:
 

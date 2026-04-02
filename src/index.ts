@@ -15,6 +15,8 @@ import { saveEnvConfig, getEnvConfig, listEnvs, getConfigFilePath, getActiveEnv,
 import type { DatabaseConfig } from './config/manager.js';
 import { seedSchema, seedMultipleSchemas, discoverSeedFiles, getPendingSeedFiles } from './seed/executor.js';
 import type { SeedResult } from './seed/executor.js';
+import { applySqlToSchema, prepareApplySql, readApplySqlFile } from './apply/executor.js';
+import type { ApplyResult } from './apply/executor.js';
 import {
     type DataValidationRules,
     discoverAccountImportPlans,
@@ -3370,6 +3372,185 @@ function printSeedResult(result: SeedResult): void {
         }
     }
 }
+
+function printApplyResult(result: ApplyResult): void {
+    if (result.skipped) {
+        logger.info(`${chalk.cyan(result.schemaName)} (${result.status}): SKIPPED`);
+        return;
+    }
+
+    if (result.success) {
+        logger.success(`${chalk.cyan(result.schemaName)} (${result.status}): OK`);
+        return;
+    }
+
+    logger.error(`${chalk.cyan(result.schemaName)} (${result.status}): ERROR`);
+    if (result.error) {
+        logger.log(`    ${chalk.red(result.error)}`);
+    }
+}
+
+program
+    .command('apply')
+    .description('Apply a SQL file to all AVAILABLE and ALLOCATED schemas')
+    .requiredOption('--sql <path>', 'Path to SQL file')
+    .option('-y, --yes', 'Skip per-schema confirmation prompts')
+    .action(async (options) => {
+        try {
+            logger.header('🧩 Apply SQL To Schemas');
+
+            const envName = (await getActiveEnv()) || (await promptEnvSelection('Select environment for SQL apply:'));
+            const resolvedSqlPath = resolve(options.sql);
+
+            logger.log(`  Environment: ${chalk.cyan(envName)}`);
+            logger.log(`  SQL file:    ${chalk.cyan(resolvedSqlPath)}`);
+            logger.log('');
+
+            logger.startSpinner('Testing database connection...');
+            await testConnection();
+            logger.succeedSpinner('Database connection successful');
+
+            logger.startSpinner('Verifying common schema...');
+            await verifyCommonSchema();
+            logger.succeedSpinner('Common schema verified');
+
+            logger.startSpinner('Reading SQL file...');
+            const rawSql = await readApplySqlFile(resolvedSqlPath);
+            logger.succeedSpinner('SQL file loaded');
+
+            const allSchemas = await listSchemas();
+            const targetSchemas = allSchemas.filter((schema) =>
+                schema.status === 'AVAILABLE' || schema.status === 'ALLOCATED'
+            );
+
+            if (targetSchemas.length === 0) {
+                logger.log('');
+                logger.warn('No schemas found with status AVAILABLE or ALLOCATED.');
+                process.exit(0);
+            }
+
+            logger.info(`Found ${chalk.bold(targetSchemas.length)} target schema(s)`);
+            logger.log('');
+
+            const results: ApplyResult[] = [];
+            let abortedAfterFailure = false;
+
+            for (const [index, schema] of targetSchemas.entries()) {
+                logger.divider();
+                logger.log(chalk.bold(`Schema ${index + 1} of ${targetSchemas.length}`));
+                logger.log(chalk.bold('Schema Details:'));
+                logger.log(`  Schema: ${chalk.cyan(schema.schema_name)}`);
+                logger.log(`  Status: ${chalk.cyan(schema.status)}`);
+
+                if (!options.yes) {
+                    logger.log('');
+                    const answer = await inquirer.prompt([
+                        {
+                            type: 'confirm',
+                            name: 'proceed',
+                            message: `Apply SQL to '${schema.schema_name}'?`,
+                            default: false,
+                        },
+                    ]);
+
+                    if (!answer.proceed) {
+                        const result: ApplyResult = {
+                            schemaName: schema.schema_name,
+                            status: schema.status,
+                            executed: false,
+                            skipped: true,
+                            success: true,
+                        };
+                        results.push(result);
+                        printApplyResult(result);
+                        logger.log('');
+                        continue;
+                    }
+                }
+
+                logger.log('');
+                logger.startSpinner(`Applying SQL to '${schema.schema_name}'...`);
+
+                try {
+                    const sql = prepareApplySql(rawSql, schema.schema_name);
+                    await applySqlToSchema(schema.schema_name, sql);
+
+                    logger.succeedSpinner(`Applied SQL to '${schema.schema_name}'`);
+                    const result: ApplyResult = {
+                        schemaName: schema.schema_name,
+                        status: schema.status,
+                        executed: true,
+                        skipped: false,
+                        success: true,
+                    };
+                    results.push(result);
+                    printApplyResult(result);
+                } catch (error) {
+                    const errorMessage = error instanceof Error ? error.message : String(error);
+                    logger.failSpinner(`Failed to apply SQL to '${schema.schema_name}'`);
+                    const result: ApplyResult = {
+                        schemaName: schema.schema_name,
+                        status: schema.status,
+                        executed: true,
+                        skipped: false,
+                        success: false,
+                        error: errorMessage,
+                    };
+                    results.push(result);
+                    printApplyResult(result);
+                    logger.log('');
+
+                    const answer = await inquirer.prompt([
+                        {
+                            type: 'confirm',
+                            name: 'continue',
+                            message: 'Continue with remaining schemas?',
+                            default: false,
+                        },
+                    ]);
+
+                    if (!answer.continue) {
+                        abortedAfterFailure = true;
+                        break;
+                    }
+                }
+
+                logger.log('');
+            }
+
+            const appliedCount = results.filter((result) => result.success && result.executed).length;
+            const skippedCount = results.filter((result) => result.skipped).length;
+            const failedCount = results.filter((result) => !result.success).length;
+            const unprocessedCount = targetSchemas.length - results.length;
+
+            logger.log('');
+            logger.divider();
+            logger.header('📊 Apply Summary');
+
+            results.forEach(printApplyResult);
+
+            if (unprocessedCount > 0) {
+                logger.warn(`${unprocessedCount} schema(s) were not processed after aborting the run.`);
+            }
+
+            logger.log('');
+            logger.divider();
+            logger.log(
+                `${chalk.bold('Total:')} ${targetSchemas.length} schema(s), ` +
+                `${appliedCount} applied, ${skippedCount} skipped, ${failedCount} failed`
+            );
+
+            if (failedCount > 0 || abortedAfterFailure) {
+                process.exit(1);
+            }
+        } catch (error) {
+            logger.failSpinner();
+            logger.error(`SQL apply failed: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        } finally {
+            await closePool();
+        }
+    });
 
 program
     .command('seed [schema-name]')
