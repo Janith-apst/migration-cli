@@ -30,6 +30,7 @@ import {
 import {
     DynamoDBClient,
     CreateTableCommand,
+    type CreateTableCommandInput,
     ListTablesCommand,
     DeleteTableCommand,
     DescribeTableCommand,
@@ -78,6 +79,24 @@ type DynamoTableInspection = {
     error?: string;
 };
 
+type ManagedDynamoTableKind = 'prep-data' | 'event_data';
+
+type ManagedDynamoTableDefinition = {
+    kind: ManagedDynamoTableKind;
+    tableName: string;
+    createInput: CreateTableCommandInput;
+};
+
+type ManagedDynamoTableEnsureInspection = {
+    schemaName: string;
+    accountCode: string;
+    definition: ManagedDynamoTableDefinition;
+    status: 'present' | 'missing' | 'error';
+    tableStatus?: string;
+    billingMode?: DynamoBillingMode;
+    error?: string;
+};
+
 function getAwsConfig(config: DatabaseConfig | null | undefined): AwsReadyConfig | null {
     if (config?.region && config.awsAccessKeyId && config.awsSecretAccessKey) {
         return config as AwsReadyConfig;
@@ -87,6 +106,10 @@ function getAwsConfig(config: DatabaseConfig | null | undefined): AwsReadyConfig
 
 function getAccountCodeFromSchemaName(schemaName: string): string {
     return schemaName.replace('account_', '').replace(/_/g, '');
+}
+
+function getManagedDynamoTableKindLabel(kind: ManagedDynamoTableKind): string {
+    return kind;
 }
 
 function createDynamoClient(config: AwsReadyConfig): DynamoDBClient {
@@ -103,6 +126,43 @@ function getManagedDynamoTablePrefixes(envName: string): string[] {
     return [
         `${envName}-prep-data-`,
         `${envName}-event_data_`,
+    ];
+}
+
+function getManagedDynamoTableDefinitionsForSchema(envName: string, schemaName: string): ManagedDynamoTableDefinition[] {
+    const accountCode = getAccountCodeFromSchemaName(schemaName);
+
+    return [
+        {
+            kind: 'prep-data',
+            tableName: `${envName}-prep-data-${accountCode}`,
+            createInput: {
+                TableName: `${envName}-prep-data-${accountCode}`,
+                KeySchema: [
+                    { AttributeName: 'product_id', KeyType: 'HASH' },
+                ],
+                AttributeDefinitions: [
+                    { AttributeName: 'product_id', AttributeType: 'S' },
+                ],
+                BillingMode: 'PAY_PER_REQUEST',
+            },
+        },
+        {
+            kind: 'event_data',
+            tableName: `${envName}-event_data_${accountCode}`,
+            createInput: {
+                TableName: `${envName}-event_data_${accountCode}`,
+                KeySchema: [
+                    { AttributeName: 'source_id', KeyType: 'HASH' },
+                    { AttributeName: 'entity', KeyType: 'RANGE' },
+                ],
+                AttributeDefinitions: [
+                    { AttributeName: 'source_id', AttributeType: 'S' },
+                    { AttributeName: 'entity', AttributeType: 'S' },
+                ],
+                BillingMode: 'PAY_PER_REQUEST',
+            },
+        },
     ];
 }
 
@@ -170,81 +230,70 @@ async function waitForDynamoTableActive(client: DynamoDBClient, tableName: strin
     throw new Error(`Timed out waiting for DynamoDB table '${tableName}' to become ACTIVE`);
 }
 
-async function createDynamoTableForSchema(envName: string, schemaName: string, config: AwsReadyConfig): Promise<void> {
-    const accountCode = getAccountCodeFromSchemaName(schemaName);
-    const tableName = `${envName}-prep-data-${accountCode}`;
-
-    logger.log('');
-    logger.log(chalk.bold('DynamoDB Table:'));
-    logger.log(`  Table Name: ${chalk.cyan(tableName)}`);
-    logger.log(`  Region:     ${chalk.cyan(config.region)}`);
-    logger.log('');
-
+async function inspectManagedDynamoTable(
+    client: DynamoDBClient,
+    schemaName: string,
+    accountCode: string,
+    definition: ManagedDynamoTableDefinition
+): Promise<ManagedDynamoTableEnsureInspection> {
     try {
-        logger.startSpinner('Creating DynamoDB table...');
-        const dynamoDB = createDynamoClient(config);
+        const response = await client.send(new DescribeTableCommand({ TableName: definition.tableName }));
+        return {
+            schemaName,
+            accountCode,
+            definition,
+            status: 'present',
+            billingMode: getBillingModeFromTableDescription(response.Table),
+            tableStatus: response.Table?.TableStatus,
+        };
+    } catch (error: any) {
+        if (error?.name === 'ResourceNotFoundException') {
+            return {
+                schemaName,
+                accountCode,
+                definition,
+                status: 'missing',
+            };
+        }
 
-        await dynamoDB.send(new CreateTableCommand({
-            TableName: tableName,
-            KeySchema: [
-                { AttributeName: 'product_id', KeyType: 'HASH' },
-            ],
-            AttributeDefinitions: [
-                { AttributeName: 'product_id', AttributeType: 'S' },
-            ],
-            BillingMode: 'PAY_PER_REQUEST',
-        }));
-
-        logger.succeedSpinner('DynamoDB table created successfully (on-demand billing)');
-        logger.log('');
-        logger.success(`✅ DynamoDB table '${chalk.cyan(tableName)}' created with on-demand billing!`);
-    } catch (dynamoError) {
-        logger.failSpinner();
-        logger.error(`DynamoDB table creation failed for '${tableName}': ${dynamoError instanceof Error ? dynamoError.message : String(dynamoError)}`);
-        logger.warn('Schema was created successfully, but DynamoDB table creation failed.');
+        return {
+            schemaName,
+            accountCode,
+            definition,
+            status: 'error',
+            error: error instanceof Error ? error.message : String(error),
+        };
     }
 }
 
-async function createEventDataDynamoTableForSchema(envName: string, schemaName: string, config: AwsReadyConfig): Promise<void> {
-    const accountCode = getAccountCodeFromSchemaName(schemaName);
-    const tableName = `${envName}-event_data_${accountCode}`;
-
-    logger.log('');
-    logger.log(chalk.bold('DynamoDB Event Data Table:'));
-    logger.log(`  Table Name: ${chalk.cyan(tableName)}`);
-    logger.log(`  Region:     ${chalk.cyan(config.region)}`);
-    logger.log('');
-
-    try {
-        logger.startSpinner('Creating DynamoDB event_data table...');
-        const dynamoDB = createDynamoClient(config);
-
-        await dynamoDB.send(new CreateTableCommand({
-            TableName: tableName,
-            KeySchema: [
-                { AttributeName: 'source_id', KeyType: 'HASH' },
-                { AttributeName: 'entity', KeyType: 'RANGE' },
-            ],
-            AttributeDefinitions: [
-                { AttributeName: 'source_id', AttributeType: 'S' },
-                { AttributeName: 'entity', AttributeType: 'S' },
-            ],
-            BillingMode: 'PAY_PER_REQUEST',
-        }));
-
-        logger.succeedSpinner('DynamoDB event_data table created successfully (on-demand billing)');
-        logger.log('');
-        logger.success(`✅ DynamoDB table '${chalk.cyan(tableName)}' created with on-demand billing!`);
-    } catch (dynamoError) {
-        logger.failSpinner();
-        logger.error(`DynamoDB table creation failed for '${tableName}': ${dynamoError instanceof Error ? dynamoError.message : String(dynamoError)}`);
-        logger.warn('Schema was created successfully, but event_data DynamoDB table creation failed.');
-    }
+async function createManagedDynamoTable(client: DynamoDBClient, definition: ManagedDynamoTableDefinition): Promise<void> {
+    await client.send(new CreateTableCommand(definition.createInput));
+    await waitForDynamoTableActive(client, definition.tableName);
 }
 
 async function createDynamoTablesForSchema(envName: string, schemaName: string, config: AwsReadyConfig): Promise<void> {
-    await createDynamoTableForSchema(envName, schemaName, config);
-    await createEventDataDynamoTableForSchema(envName, schemaName, config);
+    const dynamoDB = createDynamoClient(config);
+    const definitions = getManagedDynamoTableDefinitionsForSchema(envName, schemaName);
+
+    for (const definition of definitions) {
+        logger.log('');
+        logger.log(chalk.bold(`DynamoDB ${getManagedDynamoTableKindLabel(definition.kind)} Table:`));
+        logger.log(`  Table Name: ${chalk.cyan(definition.tableName)}`);
+        logger.log(`  Region:     ${chalk.cyan(config.region)}`);
+        logger.log('');
+
+        try {
+            logger.startSpinner(`Creating DynamoDB ${getManagedDynamoTableKindLabel(definition.kind)} table...`);
+            await createManagedDynamoTable(dynamoDB, definition);
+            logger.succeedSpinner(`DynamoDB ${getManagedDynamoTableKindLabel(definition.kind)} table created successfully (on-demand billing)`);
+            logger.log('');
+            logger.success(`✅ DynamoDB table '${chalk.cyan(definition.tableName)}' created with on-demand billing!`);
+        } catch (dynamoError) {
+            logger.failSpinner();
+            logger.error(`DynamoDB table creation failed for '${definition.tableName}': ${dynamoError instanceof Error ? dynamoError.message : String(dynamoError)}`);
+            logger.warn(`Schema was created successfully, but ${getManagedDynamoTableKindLabel(definition.kind)} DynamoDB table creation failed.`);
+        }
+    }
 }
 
 async function deleteDynamoTableForSchema(envName: string, schemaName: string, config: AwsReadyConfig): Promise<void> {
@@ -2531,6 +2580,176 @@ program
             logger.failSpinner();
             logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
             process.exit(1);
+        }
+    });
+
+program
+    .command('dynamodb:ensure-tables')
+    .description('Preview or create missing managed DynamoDB tables for all account schemas')
+    .option('--apply', 'Create missing managed DynamoDB tables')
+    .option('-y, --yes', 'Skip confirmation prompt when used with --apply')
+    .action(async (options) => {
+        try {
+            logger.header('🧱 Ensure DynamoDB Tables');
+
+            const envName = (await getActiveEnv()) || (await promptEnvSelection('Select environment for DynamoDB table verification:'));
+            const envConfig = await getEnvConfig(envName);
+            if (!envConfig) {
+                logger.error(`Environment '${envName}' not found`);
+                process.exit(1);
+            }
+
+            const awsConfig = getAwsConfig(envConfig);
+            if (!awsConfig) {
+                logger.error('AWS credentials are not configured for this environment. Please configure AWS credentials first.');
+                process.exit(1);
+            }
+
+            logger.startSpinner('Testing database connection...');
+            await testConnection();
+            logger.succeedSpinner('Database connection successful');
+
+            logger.startSpinner('Verifying common schema...');
+            await verifyCommonSchema();
+            logger.succeedSpinner('Common schema verified');
+
+            logger.log('');
+            logger.log(chalk.bold('Configuration:'));
+            logger.log(`  Environment: ${chalk.cyan(envName)}`);
+            logger.log(`  Region:      ${chalk.cyan(awsConfig.region)}`);
+            logger.log(`  Mode:        ${chalk.cyan(options.apply ? 'apply' : 'dry-run')}`);
+            logger.log('');
+
+            logger.startSpinner('Discovering account schemas from database...');
+            const schemaNames = await listAccountSchemasFromDb();
+            logger.succeedSpinner(`Found ${schemaNames.length} schema(s) matching account_*`);
+
+            if (schemaNames.length === 0) {
+                logger.info('No account_* schemas found in the database.');
+                process.exit(0);
+            }
+
+            logger.startSpinner('Inspecting expected DynamoDB tables...');
+            const dynamoDB = createDynamoClient(awsConfig);
+            const inspectionsBySchema = await Promise.all(
+                schemaNames.map(async (schemaName) => {
+                    const accountCode = getAccountCodeFromSchemaName(schemaName);
+                    const definitions = getManagedDynamoTableDefinitionsForSchema(envName, schemaName);
+                    const tables = await Promise.all(
+                        definitions.map((definition) => inspectManagedDynamoTable(dynamoDB, schemaName, accountCode, definition))
+                    );
+
+                    return {
+                        schemaName,
+                        accountCode,
+                        tables,
+                    };
+                })
+            );
+            logger.succeedSpinner('DynamoDB inspection complete');
+
+            const flatInspections = inspectionsBySchema.flatMap((item) => item.tables);
+            const presentTables = flatInspections.filter((item) => item.status === 'present');
+            const missingTables = flatInspections.filter((item) => item.status === 'missing');
+            const inspectionErrors = flatInspections.filter((item) => item.status === 'error');
+
+            logger.log('');
+            logger.log(chalk.bold('Schema Plan:'));
+            inspectionsBySchema.forEach((item, index) => {
+                logger.log(`  [${index + 1}/${inspectionsBySchema.length}] ${chalk.cyan(item.schemaName)}`);
+                item.tables.forEach((table) => {
+                    const status = table.status === 'present'
+                        ? chalk.green('PRESENT')
+                        : table.status === 'missing'
+                            ? chalk.yellow('MISSING')
+                            : chalk.red('ERROR');
+                    const details = table.status === 'present'
+                        ? chalk.gray(` (${table.billingMode || 'UNKNOWN'}${table.tableStatus ? `, ${table.tableStatus}` : ''})`)
+                        : '';
+                    logger.log(`    ${getManagedDynamoTableKindLabel(table.definition.kind)}: ${chalk.cyan(table.definition.tableName)} - ${status}${details}`);
+                    if (table.error) {
+                        logger.log(`      ${chalk.red(table.error)}`);
+                    }
+                });
+            });
+
+            logger.log('');
+            logger.log(chalk.bold('Summary:'));
+            logger.log(`  Schemas scanned:   ${chalk.cyan(inspectionsBySchema.length)}`);
+            logger.log(`  Tables expected:   ${chalk.cyan(flatInspections.length)}`);
+            logger.log(`  Tables present:    ${chalk.cyan(presentTables.length)}`);
+            logger.log(`  Tables missing:    ${chalk.cyan(missingTables.length)}`);
+            logger.log(`  Inspection errors: ${chalk.cyan(inspectionErrors.length)}`);
+
+            if (!options.apply) {
+                logger.log('');
+                logger.info('Dry-run complete. Re-run with --apply to create the missing tables.');
+                if (inspectionErrors.length > 0) {
+                    process.exit(1);
+                }
+                process.exit(0);
+            }
+
+            if (missingTables.length === 0) {
+                logger.log('');
+                logger.info('No missing DynamoDB tables need creation.');
+                if (inspectionErrors.length > 0) {
+                    process.exit(1);
+                }
+                process.exit(0);
+            }
+
+            if (!options.yes) {
+                logger.log('');
+                const answer = await inquirer.prompt([
+                    {
+                        type: 'confirm',
+                        name: 'proceed',
+                        message: `Create ${missingTables.length} missing DynamoDB table(s) across ${new Set(missingTables.map((item) => item.schemaName)).size} schema(s)?`,
+                        default: false,
+                    },
+                ]);
+
+                if (!answer.proceed) {
+                    logger.info('Table creation cancelled');
+                    process.exit(0);
+                }
+            }
+
+            let createdCount = 0;
+            let creationFailures = 0;
+
+            for (const table of missingTables) {
+                try {
+                    logger.startSpinner(`Creating '${table.definition.tableName}' for '${table.schemaName}'...`);
+                    await createManagedDynamoTable(dynamoDB, table.definition);
+                    logger.succeedSpinner(`DynamoDB table '${table.definition.tableName}' created`);
+                    createdCount++;
+                } catch (error) {
+                    logger.failSpinner();
+                    logger.warn(`Failed to create DynamoDB table '${table.definition.tableName}': ${error instanceof Error ? error.message : String(error)}`);
+                    creationFailures++;
+                }
+            }
+
+            logger.log('');
+            logger.log(chalk.bold('Creation Summary:'));
+            logger.log(`  Tables expected:   ${chalk.cyan(flatInspections.length)}`);
+            logger.log(`  Tables present:    ${chalk.cyan(presentTables.length)}`);
+            logger.log(`  Tables missing:    ${chalk.cyan(missingTables.length)}`);
+            logger.log(`  Tables created:    ${chalk.cyan(createdCount)}`);
+            logger.log(`  Creation failures: ${chalk.cyan(creationFailures)}`);
+            logger.log(`  Inspection errors: ${chalk.cyan(inspectionErrors.length)}`);
+
+            if (inspectionErrors.length > 0 || creationFailures > 0) {
+                process.exit(1);
+            }
+        } catch (error) {
+            logger.failSpinner();
+            logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        } finally {
+            await closePool();
         }
     });
 

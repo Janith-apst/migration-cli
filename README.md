@@ -631,6 +631,34 @@ List all tables in the configured region:
 phantm dynamodb:list-tables
 ```
 
+Preview missing managed tables for every `account_*` schema in the active environment:
+
+```bash
+phantm dynamodb:ensure-tables
+```
+
+Create any missing managed tables in on-demand mode:
+
+```bash
+phantm dynamodb:ensure-tables --apply
+```
+
+Skip the confirmation prompt when creating:
+
+```bash
+phantm dynamodb:ensure-tables --apply -y
+```
+
+`dynamodb:ensure-tables`:
+
+- Scans all PostgreSQL schemas matching `account_*`
+- Derives the exact expected table names for each schema
+- Checks whether these tables exist:
+  - `${environment}-prep-data-${accountCode}`
+  - `${environment}-event_data_${accountCode}`
+- Runs in dry-run mode by default and only creates missing tables when `--apply` is used
+- Creates missing tables with `PAY_PER_REQUEST` billing
+
 Preview managed tables that would be converted to on-demand billing for the active environment:
 
 ```bash
