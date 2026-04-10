@@ -197,6 +197,30 @@ function getBillingModeFromTableDescription(table: { BillingModeSummary?: { Bill
     return table?.BillingModeSummary?.BillingMode === 'PAY_PER_REQUEST' ? 'PAY_PER_REQUEST' : 'PROVISIONED';
 }
 
+function isDynamoResourceNotFoundError(error: unknown): boolean {
+    if (!error || typeof error !== 'object') {
+        const text = String(error || '');
+        return text.includes('ResourceNotFoundException');
+    }
+
+    const maybeError = error as {
+        name?: string;
+        code?: string;
+        message?: string;
+        Code?: string;
+        __type?: string;
+    };
+
+    return [
+        maybeError.name,
+        maybeError.code,
+        maybeError.Code,
+        maybeError.__type,
+        maybeError.message,
+        String(error),
+    ].some((value) => typeof value === 'string' && value.includes('ResourceNotFoundException'));
+}
+
 async function inspectDynamoTable(client: DynamoDBClient, tableName: string): Promise<DynamoTableInspection> {
     try {
         const response = await client.send(new DescribeTableCommand({ TableName: tableName }));
@@ -247,7 +271,7 @@ async function inspectManagedDynamoTable(
             tableStatus: response.Table?.TableStatus,
         };
     } catch (error: any) {
-        if (error?.name === 'ResourceNotFoundException') {
+        if (isDynamoResourceNotFoundError(error)) {
             return {
                 schemaName,
                 accountCode,
@@ -307,7 +331,7 @@ async function deleteDynamoTableForSchema(envName: string, schemaName: string, c
         await dynamoDB.send(new DeleteTableCommand({ TableName: tableName }));
         logger.succeedSpinner(`DynamoDB table '${tableName}' deleted`);
     } catch (dynamoError: any) {
-        if (dynamoError?.name === 'ResourceNotFoundException') {
+        if (isDynamoResourceNotFoundError(dynamoError)) {
             logger.succeedSpinner(`DynamoDB table '${tableName}' does not exist (skipped)`);
         } else {
             logger.failSpinner();
@@ -331,7 +355,7 @@ async function deleteEventDataDynamoTableForSchema(envName: string, schemaName: 
             await dynamoDB.send(new DeleteTableCommand({ TableName: tableName }));
             logger.succeedSpinner(`DynamoDB table '${tableName}' deleted`);
         } catch (dynamoError: any) {
-            if (dynamoError?.name === 'ResourceNotFoundException') {
+            if (isDynamoResourceNotFoundError(dynamoError)) {
                 logger.succeedSpinner(`DynamoDB table '${tableName}' does not exist (skipped)`);
             } else {
                 logger.failSpinner();
@@ -493,7 +517,7 @@ async function deleteDynamoTablesByName(tableNames: string[], config: AwsReadyCo
             await client.send(new DeleteTableCommand({ TableName: tableName }));
             logger.succeedSpinner(`DynamoDB table '${tableName}' deleted`);
         } catch (error: any) {
-            if (error?.name === 'ResourceNotFoundException') {
+            if (isDynamoResourceNotFoundError(error)) {
                 logger.succeedSpinner(`DynamoDB table '${tableName}' does not exist (skipped)`);
             } else {
                 logger.failSpinner();
