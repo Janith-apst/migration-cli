@@ -105,7 +105,7 @@ function getAwsConfig(config: DatabaseConfig | null | undefined): AwsReadyConfig
 }
 
 function getAccountCodeFromSchemaName(schemaName: string): string {
-    return schemaName.replace('account_', '').replace(/_/g, '');
+    return schemaName.replace(/^account_/, '');
 }
 
 function getManagedDynamoTableKindLabel(kind: ManagedDynamoTableKind): string {
@@ -394,7 +394,7 @@ type CleanupContext = {
 };
 
 function getAccountCodeFromSchema(schemaName: string): string {
-    return schemaName.replace(/^account_/, '').replace(/_/g, '');
+    return schemaName.replace(/^account_/, '');
 }
 
 function toColomboTime(value: unknown): string {
