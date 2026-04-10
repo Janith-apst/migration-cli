@@ -97,6 +97,19 @@ type ManagedDynamoTableEnsureInspection = {
     error?: string;
 };
 
+type ParsedManagedDynamoTable = {
+    tableName: string;
+    kind: ManagedDynamoTableKind;
+    accountCode: string;
+    expectedSchemaName: string;
+};
+
+type DynamoDeleteResult = {
+    tableName: string;
+    status: 'deleted' | 'skipped' | 'failed';
+    error?: string;
+};
+
 function getAwsConfig(config: DatabaseConfig | null | undefined): AwsReadyConfig | null {
     if (config?.region && config.awsAccessKeyId && config.awsSecretAccessKey) {
         return config as AwsReadyConfig;
@@ -127,6 +140,36 @@ function getManagedDynamoTablePrefixes(envName: string): string[] {
         `${envName}-prep-data-`,
         `${envName}-event_data_`,
     ];
+}
+
+function escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function parseManagedDynamoTableForEnv(tableName: string, envName: string): ParsedManagedDynamoTable | null {
+    const envPattern = escapeRegExp(envName);
+    const patterns: Array<{ kind: ManagedDynamoTableKind; regex: RegExp }> = [
+        { kind: 'prep-data', regex: new RegExp(`^${envPattern}-prep-data-(.+)$`) },
+        { kind: 'event_data', regex: new RegExp(`^${envPattern}-event_data_(.+)$`) },
+        { kind: 'event_data', regex: new RegExp(`^${envPattern}-event_data-(.+)$`) },
+    ];
+
+    for (const pattern of patterns) {
+        const match = tableName.match(pattern.regex);
+        if (!match) {
+            continue;
+        }
+
+        const accountCode = match[1];
+        return {
+            tableName,
+            kind: pattern.kind,
+            accountCode,
+            expectedSchemaName: `account_${accountCode}`,
+        };
+    }
+
+    return null;
 }
 
 function getManagedDynamoTableDefinitionsForSchema(envName: string, schemaName: string): ManagedDynamoTableDefinition[] {
@@ -512,18 +555,36 @@ async function deleteDynamoTablesByName(tableNames: string[], config: AwsReadyCo
     const client = createDynamoClient(config);
 
     for (const tableName of tableNames) {
-        try {
-            logger.startSpinner(`Deleting DynamoDB table '${tableName}'...`);
-            await client.send(new DeleteTableCommand({ TableName: tableName }));
-            logger.succeedSpinner(`DynamoDB table '${tableName}' deleted`);
-        } catch (error: any) {
-            if (isDynamoResourceNotFoundError(error)) {
-                logger.succeedSpinner(`DynamoDB table '${tableName}' does not exist (skipped)`);
-            } else {
-                logger.failSpinner();
-                logger.warn(`Failed to delete DynamoDB table '${tableName}': ${error instanceof Error ? error.message : String(error)}`);
-            }
+        await deleteSingleDynamoTable(client, tableName);
+    }
+}
+
+async function deleteSingleDynamoTable(client: DynamoDBClient, tableName: string): Promise<DynamoDeleteResult> {
+    try {
+        logger.startSpinner(`Deleting DynamoDB table '${tableName}'...`);
+        await client.send(new DeleteTableCommand({ TableName: tableName }));
+        logger.succeedSpinner(`DynamoDB table '${tableName}' deleted`);
+        return {
+            tableName,
+            status: 'deleted',
+        };
+    } catch (error: any) {
+        if (isDynamoResourceNotFoundError(error)) {
+            logger.succeedSpinner(`DynamoDB table '${tableName}' does not exist (skipped)`);
+            return {
+                tableName,
+                status: 'skipped',
+            };
         }
+
+        logger.failSpinner();
+        const message = error instanceof Error ? error.message : String(error);
+        logger.warn(`Failed to delete DynamoDB table '${tableName}': ${message}`);
+        return {
+            tableName,
+            status: 'failed',
+            error: message,
+        };
     }
 }
 
@@ -2604,6 +2665,137 @@ program
             logger.failSpinner();
             logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
             process.exit(1);
+        }
+    });
+
+program
+    .command('dynamodb:cleanup-unused')
+    .description('Preview or delete orphaned managed DynamoDB tables for the selected environment')
+    .option('--delete', 'Delete orphaned managed DynamoDB tables')
+    .option('-y, --yes', 'Skip confirmation prompt when used with --delete')
+    .action(async (options) => {
+        try {
+            logger.header('🧹 DynamoDB Unused Table Cleanup');
+
+            const envName = (await getActiveEnv()) || (await promptEnvSelection('Select environment for DynamoDB cleanup:'));
+            const envConfig = await getEnvConfig(envName);
+            if (!envConfig) {
+                logger.error(`Environment '${envName}' not found`);
+                process.exit(1);
+            }
+
+            const awsConfig = getAwsConfig(envConfig);
+            if (!awsConfig) {
+                logger.error('AWS credentials are not configured for this environment. Please configure AWS credentials first.');
+                process.exit(1);
+            }
+
+            logger.startSpinner('Testing database connection...');
+            await testConnection();
+            logger.succeedSpinner('Database connection successful');
+
+            logger.log('');
+            logger.log(chalk.bold('Configuration:'));
+            logger.log(`  Environment: ${chalk.cyan(envName)}`);
+            logger.log(`  Region:      ${chalk.cyan(awsConfig.region)}`);
+            logger.log(`  Mode:        ${chalk.cyan(options.delete ? 'delete' : 'dry-run')}`);
+            logger.log('');
+
+            logger.startSpinner('Discovering account schemas from database...');
+            const schemaNames = await listAccountSchemasFromDb();
+            logger.succeedSpinner(`Found ${schemaNames.length} schema(s) matching account_*`);
+
+            const validAccountCodes = new Set<string>(
+                schemaNames.map((schemaName) => getAccountCodeFromSchemaName(schemaName))
+            );
+
+            logger.startSpinner('Discovering managed DynamoDB tables for the selected environment...');
+            const dynamoDB = createDynamoClient(awsConfig);
+            const allTableNames = await listAllDynamoTableNames(dynamoDB);
+            const managedTables = allTableNames
+                .map((tableName) => parseManagedDynamoTableForEnv(tableName, envName))
+                .filter((table): table is ParsedManagedDynamoTable => Boolean(table))
+                .sort((left, right) => left.tableName.localeCompare(right.tableName));
+            logger.succeedSpinner(`Found ${managedTables.length} managed table(s)`);
+
+            const matchedTables = managedTables.filter((table) => validAccountCodes.has(table.accountCode));
+            const orphanTables = managedTables.filter((table) => !validAccountCodes.has(table.accountCode));
+
+            logger.log('');
+            logger.log(chalk.bold('Summary:'));
+            logger.log(`  Schemas scanned: ${chalk.cyan(schemaNames.length)}`);
+            logger.log(`  Managed tables:  ${chalk.cyan(managedTables.length)}`);
+            logger.log(`  Matched tables:  ${chalk.cyan(matchedTables.length)}`);
+            logger.log(`  Orphan tables:   ${chalk.cyan(orphanTables.length)}`);
+
+            logger.log('');
+            if (orphanTables.length === 0) {
+                logger.info('No orphaned managed DynamoDB tables found.');
+                process.exit(0);
+            }
+
+            logger.log(chalk.bold('Orphaned Managed Tables:'));
+            orphanTables.forEach((table, index) => {
+                logger.log(`  ${index + 1}. ${chalk.cyan(table.tableName)}`);
+                logger.log(`     Kind:            ${chalk.cyan(getManagedDynamoTableKindLabel(table.kind))}`);
+                logger.log(`     Account code:    ${chalk.cyan(table.accountCode)}`);
+                logger.log(`     Expected schema: ${chalk.cyan(table.expectedSchemaName)}`);
+            });
+
+            if (!options.delete) {
+                logger.log('');
+                logger.info('Dry-run complete. Re-run with --delete to remove the orphaned tables.');
+                process.exit(0);
+            }
+
+            if (!options.yes) {
+                logger.log('');
+                const answer = await inquirer.prompt([
+                    {
+                        type: 'confirm',
+                        name: 'proceed',
+                        message: `Delete ${orphanTables.length} orphaned DynamoDB table(s)?`,
+                        default: false,
+                    },
+                ]);
+
+                if (!answer.proceed) {
+                    logger.info('Unused DynamoDB table cleanup cancelled');
+                    process.exit(0);
+                }
+            }
+
+            let deletedCount = 0;
+            let skippedCount = 0;
+            let failedCount = 0;
+
+            for (const table of orphanTables) {
+                const result = await deleteSingleDynamoTable(dynamoDB, table.tableName);
+                if (result.status === 'deleted') {
+                    deletedCount++;
+                } else if (result.status === 'skipped') {
+                    skippedCount++;
+                } else {
+                    failedCount++;
+                }
+            }
+
+            logger.log('');
+            logger.log(chalk.bold('Deletion Summary:'));
+            logger.log(`  Orphan tables: ${chalk.cyan(orphanTables.length)}`);
+            logger.log(`  Deleted:       ${chalk.cyan(deletedCount)}`);
+            logger.log(`  Skipped:       ${chalk.cyan(skippedCount)}`);
+            logger.log(`  Failed:        ${chalk.cyan(failedCount)}`);
+
+            if (failedCount > 0) {
+                process.exit(1);
+            }
+        } catch (error) {
+            logger.failSpinner();
+            logger.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        } finally {
+            await closePool();
         }
     });
 

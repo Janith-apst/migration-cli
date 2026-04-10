@@ -659,6 +659,36 @@ phantm dynamodb:ensure-tables --apply -y
 - Runs in dry-run mode by default and only creates missing tables when `--apply` is used
 - Creates missing tables with `PAY_PER_REQUEST` billing
 
+Preview orphaned managed DynamoDB tables that no longer have a matching `account_*` schema:
+
+```bash
+phantm dynamodb:cleanup-unused
+```
+
+Delete the orphaned tables:
+
+```bash
+phantm dynamodb:cleanup-unused --delete
+```
+
+Skip the confirmation prompt when deleting:
+
+```bash
+phantm dynamodb:cleanup-unused --delete -y
+```
+
+`dynamodb:cleanup-unused`:
+
+- Runs in dry-run mode by default and only deletes when `--delete` is used
+- Scans PostgreSQL schemas matching `account_*` directly from the database
+- Preserves the full schema suffix when deriving account code
+- Example: `account_abcdef_mecca` maps to account code `abcdef_mecca`
+- Only considers exact managed table shapes for the selected environment:
+  - `${environment}-prep-data-${accountCode}`
+  - `${environment}-event_data_${accountCode}`
+  - legacy `${environment}-event_data-${accountCode}`
+- Deletes orphaned tables one by one and continues even if one deletion fails
+
 Preview managed tables that would be converted to on-demand billing for the active environment:
 
 ```bash
